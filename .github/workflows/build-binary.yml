@@ -1,0 +1,33 @@
+name: SP-1 Reverb Binary Builder
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-firmware:
+    name: Build sp1_verb.bin
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install ARM Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi
+
+      - name: Build SP-1 Firmware Binary
+        run: |
+          make -C firmware
+
+      - name: Upload Flashable Firmware Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sp1-verb-firmware-binary
+          path: |
+            firmware/build/sp1_verb.bin
+            firmware/build/sp1_verb.hex

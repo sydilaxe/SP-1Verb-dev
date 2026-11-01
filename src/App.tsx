@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { reverbEngine, ReverbParams, DEFAULT_PARAMS, StemState, UsbAudioConfig } from './audio/reverbEngine';
 import { PRESETS, ReverbPreset } from './audio/presets';
 import { TouchLightStrip } from './components/TouchLightStrip';
+import { BinaryBuilderModal } from './components/BinaryBuilderModal';
 import { 
   Play, 
   Square, 
@@ -13,7 +14,8 @@ import {
   ChevronRight,
   Layers,
   Usb,
-  Cpu
+  Cpu,
+  Download
 } from 'lucide-react';
 
 export default function App() {
@@ -43,8 +45,9 @@ export default function App() {
   const [serialConnected, setSerialConnected] = useState(false);
   const [serialStatus, setSerialStatus] = useState<string>('Not connected');
 
-  // Architecture Spec Modal (Off-device documentation)
+  // Architecture Spec Modal & Binary Builder Modal
   const [showDocModal, setShowDocModal] = useState(false);
+  const [showBinaryModal, setShowBinaryModal] = useState(false);
 
   // Initialize engine listener
   useEffect(() => {
@@ -261,6 +264,16 @@ export default function App() {
           >
             <Cable className={`w-3 h-3 ${usbConfig.enabled ? 'text-cyan-400 animate-pulse' : 'text-zinc-500'}`} />
             <span>{usbConfig.enabled ? 'USB AUDIO: ON' : 'USB AUDIO'}</span>
+          </button>
+
+          {/* Binary Builder / Solderless.engineering Flasher */}
+          <button
+            onClick={() => setShowBinaryModal(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-bold bg-[#ff5722] text-zinc-950 hover:bg-[#ff7a50] shadow-sm transition-all active:scale-95"
+            title="Download sp1_verb.bin for solderless.engineering"
+          >
+            <Download className="w-3 h-3" />
+            <span>BUILD .BIN</span>
           </button>
 
           {/* Reference Spec */}
@@ -880,6 +893,12 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Binary Builder Modal */}
+      <BinaryBuilderModal
+        isOpen={showBinaryModal}
+        onClose={() => setShowBinaryModal(false)}
+      />
 
       {/* Screenless Bottom Minimalist Status Footer */}
       <footer className="border-t border-zinc-900 px-6 py-2.5 flex items-center justify-between text-[11px] font-mono text-zinc-500">
