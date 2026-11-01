@@ -1,0 +1,6 @@
+{
+  "name": "SP-1 Reverb - Early Digital Reverb Processor",
+  "description": "Dedicated early digital reverberator unit with 4 primary controls (Mix, Decay, Diffusion, HP/LP Filter) and a Play-switched secondary control layer for real-time modulation of tone character.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
