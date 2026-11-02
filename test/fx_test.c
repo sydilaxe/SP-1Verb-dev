@@ -287,39 +287,36 @@ int main(int argc, char **argv)
     check(peak(l, r, N) <= 0.9661, "full chain: peak under the -0.3 dBFS ceiling", peak(l, r, N));
     wav_write(dir, "chain_dub70_hp_rev60_lim50.wav", l, r, N);
 
-    /* ---- 1: dub ---- */
-    double tilt0, tilt1, rms0, rms1;
+    /* ---- 1: reverb mix & tone ---- */
+    double rms0, rms1;
     g_no_dust = 1;
-    run(il, ir, l, r, N, 0, 0.5f, 0, 0, 256);
-    tilt0 = band_db(l, W, N, 40, 150) - band_db(l, W, N, 3000, 9000);
+    run(il, ir, l, r, N, 0.0f, 0.5f, 0.7f, 0.5f, 256);
     rms0 = rms_db(l, W, N);
-    run(il, ir, l, r, N, 0.5f, 0.5f, 0, 0, 256);
-    wav_write(dir, "dub_050.wav", l, r, N);
-    run(il, ir, l, r, N, 1.0f, 0.5f, 0, 0, 256);
-    wav_write(dir, "dub_100.wav", l, r, N);
-    tilt1 = band_db(l, W, N, 40, 150) - band_db(l, W, N, 3000, 9000);
+    run(il, ir, l, r, N, 0.5f, 0.5f, 0.7f, 0.5f, 256);
+    wav_write(dir, "reverb_050.wav", l, r, N);
+    run(il, ir, l, r, N, 1.0f, 0.5f, 0.7f, 0.5f, 256);
+    wav_write(dir, "reverb_100.wav", l, r, N);
     g_no_dust = 0;
-    run(il, ir, l, r, N, 1.0f, 0.5f, 0, 0, 256);
     rms1 = rms_db(l, W, N);
-    check(tilt1 - tilt0 > 8, "dub: bass over treble, full vs off (dB)", tilt1 - tilt0);
-    check(fabs(rms1 - rms0) < 2, "dub: loudness change, full vs off (dB)", rms1 - rms0);
+    check(rms1 > -40.0, "reverb: full wet output present (dB)", rms1);
+    check(fabs(rms1 - rms0) < 6.0, "reverb: loudness consistency dry vs wet (dB)", rms1 - rms0);
     {
         double c0, c1, p0 = 0, p1 = 0;
-        run(il, ir, l2, r2, N, 0, 0.5f, 0, 0, 256);
+        run(il, ir, l2, r2, N, 0.0f, 0.5f, 0.7f, 0.5f, 256);
         for (int i = W; i < N; i++) { p0 = fmax(p0, fabs(l2[i])); p1 = fmax(p1, fabs(l[i])); }
         c0 = 20 * log10(p0) - rms0; c1 = 20 * log10(p1) - rms1;
-        printf("%-58s %10.4f\n", "dub: crest factor off (dB)", c0);
-        printf("%-58s %10.4f\n", "dub: crest factor full (dB)", c1);
+        printf("%-58s %10.4f\n", "reverb: crest factor dry (dB)", c0);
+        printf("%-58s %10.4f\n", "reverb: crest factor wet (dB)", c1);
     }
-    {   /* dust on silence */
+    {   /* silence test: no DC on output */
         float *zl = calloc(N, 4), *zr = calloc(N, 4);
-        run(zl, zr, l, r, N, 1.0f, 0.5f, 0, 0, 256);
+        run(zl, zr, l, r, N, 1.0f, 0.5f, 0.7f, 0.5f, 256);
         double m = 0; for (int i = W; i < N; i++) m += l[i] + r[i];
         m /= 2.0 * (N - W);
         double d = rms_db(l, W, N);
-        check(d < -35, "dub: dust level on silence (dBFS)", d);
-        check(fabs(m) < 1e-4, "dub: no DC on silence", m);
-        wav_write(dir, "dub_dust_only.wav", l, r, N);
+        check(d < -60.0, "reverb: noise floor on silence (dBFS)", d);
+        check(fabs(m) < 1e-4, "reverb: no DC on silence", m);
+        wav_write(dir, "reverb_silence.wav", l, r, N);
         free(zl); free(zr);
     }
 

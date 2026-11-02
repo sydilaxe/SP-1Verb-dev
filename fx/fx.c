@@ -72,6 +72,8 @@ void fx_init(fx_engine *e, float sr)
     e->lfo_inc = 2.0f * FX_PI * 1.0f / e->cr;
 
     e->warm_c = 0.85f;
+    e->dub.dust_on = 1;
+    e->limiter.meter = 0.0f;
     fx_svf_lowpass(&e->svf_l, 10000.0f, 0.707f, e->cr);
     fx_svf_lowpass(&e->svf_r, 10000.0f, 0.707f, e->cr);
 }

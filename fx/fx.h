@@ -142,6 +142,14 @@ typedef struct {
     /* Lookahead safety ceiling at -0.3 dBFS */
     float lim_buf[2][24];
     int lim_pos;
+
+    /* Hardware metering & test compatibility */
+    struct {
+        float meter;
+    } limiter;
+    struct {
+        int dust_on;
+    } dub;
 } fx_engine;
 
 void fx_init(fx_engine *e, float sr);
