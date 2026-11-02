@@ -20,6 +20,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: sp-1verb
+
       - name: Cache the Zephyr SDK and tree
         id: zcache
         uses: actions/cache@v4
@@ -28,6 +29,7 @@ jobs:
             ~/zephyr-sdk-0.17.4
             ws
           key: zephyr-4.3.1-sdk-0.17.4-nordic
+
       - name: Zephyr SDK 0.17.4 (arm only)
         if: steps.zcache.outputs.cache-hit != 'true'
         run: |
@@ -36,6 +38,7 @@ jobs:
           tar xf sdk.tar.xz && rm sdk.tar.xz
           curl -sSL -o arm.tar.xz https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v0.17.4/toolchain_linux-x86_64_arm-zephyr-eabi.tar.xz
           tar xf arm.tar.xz -C zephyr-sdk-0.17.4 && rm arm.tar.xz
+
       - name: Zephyr v4.3.1 (hal_nordic, cmsis)
         if: steps.zcache.outputs.cache-hit != 'true'
         run: |
@@ -44,16 +47,18 @@ jobs:
           cd ws && west init -l zephyr
           west config manifest.project-filter -- '-.*,+hal_nordic,+cmsis_6,+cmsis'
           west update --narrow -o=--depth=1
+
       - name: Build
         run: |
           pip install west -r ws/zephyr/scripts/requirements-base.txt
           export ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk-0.17.4 ZEPHYR_BASE=$GITHUB_WORKSPACE/ws/zephyr
-          cd ws && ../sp-1fx/scripts/build-firmware.sh
+          cd ws && ../sp-1verb/scripts/build-firmware.sh
+
       - name: Check the binary
         run: |
           # flashable by the SP-1 bootloader: loaded at 0x20000, at most 0xDF000 bytes, the vector
           # table first (initial stack in RAM, reset handler inside the image)
-          python3 - sp-1fx/sp1fx.bin <<'PY'
+          python3 - sp-1verb/sp1verb.bin <<'PY'
           import struct, sys
           b = open(sys.argv[1], "rb").read()
           sp, reset = struct.unpack("<II", b[:8])
@@ -63,29 +68,33 @@ jobs:
           assert reset & 1 and 0x20000 <= (reset & ~1) < 0x20000 + len(b), "reset handler outside the image"
           PY
           # and it fits: RAM used, from the build
-          grep -q "CONFIG_BOARD_STEM_PLAYER=y" sp-1fx/build/firmware/zephyr/.config
+          grep -q "CONFIG_BOARD_STEM_PLAYER=y" sp-1verb/build/firmware/zephyr/.config
+
       - name: CPU estimate (Cortex-M4, every effect fully in)
         run: |
           pip install unicorn capstone
-          ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk-0.17.4 python3 sp-1fx/tools/bench_m4.py -v | tee bench.txt
+          ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk-0.17.4 python3 sp-1verb/tools/bench_m4.py -v | tee bench.txt
           # one core is 100%; keep the worst case clear of it
           pct=$(sed -n 's/.*: \([0-9]*\)% of one core.*/\1/p' bench.txt)
           echo "worst case: $pct% of one core"
           test -n "$pct" && test "$pct" -le 80
+
       - uses: actions/upload-artifact@v4
         with:
           name: sp1verb-firmware
-          path: sp-1verb-dev/sp1verb.bin
+          path: sp-1verb/sp1verb.bin
 
   test:
     name: Effects engine tests (host)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Build and run the checks
         run: |
           mkdir -p build/test
           make test | tee build/test/results.txt
+
       - name: Check the results
         run: |
           r=build/test/results.txt
@@ -98,6 +107,7 @@ jobs:
           grep -q "^sweep all faders: no clicks .* ok" $r
           grep -q "^filter: flat anywhere in the middle fifth .* ok" $r
           grep -q "^reverb: no old tail after the fader went down and up .* ok" $r
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -114,21 +124,23 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           name: sp1verb-firmware
+
       - name: Create GitHub release with sp1verb.bin
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.release_tag || github.event.release.tag_name || github.ref_name }}
         run: |
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$TAG" sp1fx.bin --repo "$GITHUB_REPOSITORY" --clobber
+            gh release upload "$TAG" sp1verb.bin --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$TAG" sp1fx.bin \
+            gh release create "$TAG" sp1verb.bin \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
-              --title "SP-1FX $TAG (test build)" \
+              --title "SP-1 Reverb $TAG" \
               --notes-file .github/release-notes.md \
               --prerelease
           fi
