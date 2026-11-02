@@ -12,27 +12,33 @@ export const BinaryBuilderModal: React.FC<BinaryBuilderModalProps> = ({ isOpen, 
   if (!isOpen) return null;
 
   // Generate / Download the SP-1 firmware binary
-  const handleDownloadBinary = () => {
-    // Generate a placeholder/packaged SP-1 binary payload with firmware header
-    const header = "SP1_VERB_NRF52840_FIRMWARE_V1.0";
-    const buffer = new Uint8Array(65536); // 64KB binary
-    for (let i = 0; i < header.length; i++) {
-      buffer[i] = header.charCodeAt(i);
-    }
-    // Pad with compiled DSP bytecode signature
-    for (let i = header.length; i < 256; i++) {
-      buffer[i] = (i * 37) & 0xff;
+  const handleDownloadBinary = async () => {
+    try {
+      const response = await fetch('/sp1verb.bin');
+      if (response.ok) {
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'sp1verb.bin';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        setDownloaded(true);
+        setTimeout(() => setDownloaded(false), 3000);
+        return;
+      }
+    } catch (e) {
+      console.warn('Direct fetch failed, falling back to static binary link', e);
     }
 
-    const blob = new Blob([buffer], { type: 'application/octet-stream' });
-    const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url;
-    a.download = 'sp1_verb.bin';
+    a.href = '/sp1verb.bin';
+    a.download = 'sp1verb.bin';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    URL.revokeObjectURL(url);
 
     setDownloaded(true);
     setTimeout(() => setDownloaded(false), 3000);
@@ -60,13 +66,13 @@ export const BinaryBuilderModal: React.FC<BinaryBuilderModalProps> = ({ isOpen, 
 
         <div className="space-y-5 text-zinc-300">
           <p className="text-[11px] text-zinc-400 leading-relaxed">
-            Build and export the compiled ARM Cortex-M4 binary (<code className="text-[#ff5722]">sp1_verb.bin</code>) for your physical Teenage Engineering SP-1 stem player, ready to flash via <strong className="text-white">solderless.engineering</strong>.
+            Build and export the compiled ARM Cortex-M4 binary (<code className="text-[#ff5722]">sp1verb.bin</code>) for your physical Teenage Engineering SP-1 stem player, ready to flash via <strong className="text-white">solderless.engineering</strong>.
           </p>
 
           {/* Download Binary Button Card */}
           <div className="p-4 rounded-2xl bg-zinc-950 border border-zinc-800 flex flex-col sm:flex-row items-center justify-between gap-3">
             <div>
-              <div className="font-bold text-zinc-100 text-xs">sp1_verb.bin</div>
+              <div className="font-bold text-zinc-100 text-xs">sp1verb.bin</div>
               <div className="text-[10px] text-zinc-500">
                 Target: Nordic nRF52840 (64MHz FPU) · Size: ~64 KB
               </div>
@@ -111,7 +117,7 @@ export const BinaryBuilderModal: React.FC<BinaryBuilderModalProps> = ({ isOpen, 
                 Open <a href="https://solderless.engineering" target="_blank" rel="noreferrer" className="text-cyan-400 underline">solderless.engineering</a> in Google Chrome or Edge.
               </li>
               <li>
-                Select your downloaded <code className="text-[#ff5722]">sp1_verb.bin</code> file and click <strong>Flash Device</strong>.
+                Select your downloaded <code className="text-[#ff5722]">sp1verb.bin</code> file and click <strong>Flash Device</strong>.
               </li>
               <li>
                 Unplug and restart your SP-1. The early digital reverb will run natively with the 4 touch sliders!
