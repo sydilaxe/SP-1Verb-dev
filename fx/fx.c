@@ -1,58 +1,89 @@
 /* SP-1 Reverb Engine: Dedicated Early Digital Reverb for Teenage Engineering SP-1.
  *
- * Implements a lightweight Schroeder-Dattorro early digital reverb running at 24 kHz
- * between two polyphase IIR half-band filters (48 kHz <-> 24 kHz).
+ * Implements a Schroeder-Dattorro early digital reverb running at 24 kHz between
+ * polyphase IIR half-band filters (48 kHz <-> 24 kHz).
  *
- * Memory footprint: ~75 KB static struct, zero heap allocations, no libm.
- * CPU load: ~28-35% on Nordic nRF52840 Cortex-M4 @ 64 MHz.
+ * Architecture matching SP-1 hardware constraints:
+ *   - Laurent de Soras 10-coeff polyphase IIR downsampler / upsampler
+ *   - Warm input stage with gentle 24 kHz saturation
+ *   - ~75 KB static struct, zero heap allocations, no libm dependencies
+ *   - Optimized for ARM Cortex-M4 (Nordic nRF52840 @ 64 MHz, ~32% CPU)
  */
 
 #include "fx.h"
 #include <string.h>
 
-/* Polyphase IIR half-band filter coefficients (Laurent de Soras HIIR) */
-static const float hb_coeffs[HB_C] = {
-    0.036681502163648017f,
-    0.13654762463195794f,
-    0.27463175937945417f,
-    0.42313861772687588f,
-    0.561098697867004f,
-    0.6775400499741616f,
-    0.769713926412704f,
-    0.8398106255632294f,
-    0.8922608680446509f,
-    0.9315419083759556f
+#ifdef FX_PROFILE
+#define STAGE __attribute__((noinline))
+#else
+#define STAGE
+#endif
+
+/* Laurent de Soras HIIR 10-coeff polyphase IIR halfband filter */
+static const float hb_c[HB_C] = {
+    0.036681502163648017f, 0.13654762463195794f, 0.27463175937945417f, 0.42313861772687588f,
+    0.561098697867004f,    0.6775400499741616f,  0.769713926412704f,   0.8398106255632294f,
+    0.8922608680446509f,   0.9315419083759556f
 };
 
-static inline float allpass_filter(float in, float *buf, int len, int *idx, float c)
+/* Unrolled polyphase IIR halfband transform (10 allpass sections) */
+static void hb_run(float *a, float *b, int n, float *y, float *x0, float *x1)
+{
+    const float c0 = hb_c[0], c1 = hb_c[1], c2 = hb_c[2], c3 = hb_c[3], c4 = hb_c[4];
+    const float c5 = hb_c[5], c6 = hb_c[6], c7 = hb_c[7], c8 = hb_c[8], c9 = hb_c[9];
+    float y0 = y[0], y1 = y[1], y2 = y[2], y3 = y[3], y4 = y[4];
+    float y5 = y[5], y6 = y[6], y7 = y[7], y8 = y[8], y9 = y[9];
+    float xa = *x0, xb = *x1;
+    for (int k = 0; k < n; k++) {
+        float s = a[k], t;
+        t = (s - y0) * c0 + xa; xa = s; s = t;
+        t = (s - y2) * c2 + y0; y0 = s; s = t;
+        t = (s - y4) * c4 + y2; y2 = s; s = t;
+        t = (s - y6) * c6 + y4; y4 = s; s = t;
+        t = (s - y8) * c8 + y6; y6 = s; y8 = t;
+        a[k] = t;
+
+        s = b[k];
+        t = (s - y1) * c1 + xb; xb = s; s = t;
+        t = (s - y3) * c3 + y1; y1 = s; s = t;
+        t = (s - y5) * c5 + y3; y3 = s; s = t;
+        t = (s - y7) * c7 + y5; y5 = s; s = t;
+        t = (s - y9) * c9 + y7; y7 = s; y9 = t;
+        b[k] = t;
+    }
+    y[0] = y0; y[1] = y1; y[2] = y2; y[3] = y3; y[4] = y4;
+    y[5] = y5; y[6] = y6; y[7] = y7; y[8] = y8; y[9] = y9;
+    *x0 = xa; *x1 = xb;
+}
+
+static inline float allpass_step(float in, float *buf, int len, int *idx, float c)
 {
     int i = *idx;
     float buf_out = buf[i];
     float v = in + c * buf_out;
     buf[i] = v;
-    *idx = (i + 1 >= len) ? 0 : i + 1;
+    i++;
+    if (i >= len) i = 0;
+    *idx = i;
     return buf_out - c * v;
 }
 
-static inline float delay_read_linear(const float *buf, int len, int wpos, float delay_samples)
+static inline float delay_read_interp(const float *buf, int len, int wpos, float delay_samps)
 {
-    float rpos = (float)wpos - delay_samples;
-    while (rpos < 0.0f) rpos += (float)len;
-    while (rpos >= (float)len) rpos -= (float)len;
-
-    int idx0 = (int)rpos;
-    int idx1 = idx0 + 1;
-    if (idx1 >= len) idx1 = 0;
-    float frac = rpos - (float)idx0;
-
-    return buf[idx0] + frac * (buf[idx1] - buf[idx0]);
+    int d_int = (int)delay_samps;
+    float frac = delay_samps - (float)d_int;
+    int rpos = wpos - d_int;
+    if (rpos < 0) rpos += len;
+    int rpos_next = rpos + 1;
+    if (rpos_next >= len) rpos_next = 0;
+    return buf[rpos] + frac * (buf[rpos_next] - buf[rpos]);
 }
 
 void fx_init(fx_engine *e, float sr)
 {
     memset(e, 0, sizeof(*e));
     e->sr = sr;
-    e->cr = sr * 0.5f; /* 24 kHz */
+    e->cr = sr * 0.5f; /* 24 kHz core */
 
     e->fader[FX_MIX] = 0.35f;
     e->fader[FX_DECAY] = 0.5f;
@@ -66,16 +97,18 @@ void fx_init(fx_engine *e, float sr)
 
     e->active_bank = 0;
     e->diff_coeff = 0.7f;
-    e->damp_coeff = 0.3f;
-    e->decay_gain = 0.75f;
+    e->damp_coeff = 0.25f;
+    e->decay_gain = 0.70f;
     e->mod_depth = 4.0f;
     e->lfo_inc = 2.0f * FX_PI * 1.0f / e->cr;
 
-    e->warm_c = 0.85f;
+    /* warm stage cutoff at 3.5 kHz */
+    e->warm_c = 1.0f - fx_exp2f(-1.44269504f / (1.0f / (2.0f * FX_PI * 3500.0f) * sr));
     e->dub.dust_on = 1;
     e->limiter.meter = 0.0f;
-    fx_svf_lowpass(&e->svf_l, 10000.0f, 0.707f, e->cr);
-    fx_svf_lowpass(&e->svf_r, 10000.0f, 0.707f, e->cr);
+
+    fx_svf_lowpass(&e->svf_l, 8000.0f, 0.707f, e->cr);
+    fx_svf_lowpass(&e->svf_r, 8000.0f, 0.707f, e->cr);
 }
 
 void fx_set_fader(fx_engine *e, int slot, float pos)
@@ -86,27 +119,27 @@ void fx_set_fader(fx_engine *e, int slot, float pos)
 
     if (slot == FX_MIX) {
         e->mix_wet = pos;
-        e->mix_dry = 1.0f - pos * 0.7f;
+        e->mix_dry = 1.0f - pos * 0.65f;
     } else if (slot == FX_DECAY) {
-        /* Decay feedback multiplier: 0.1 to 0.985 */
-        e->decay_gain = 0.15f + pos * 0.835f;
-        e->damp_coeff = 0.1f + (1.0f - pos) * 0.45f;
+        /* Decay feedback multiplier: 0.15 to 0.94 */
+        e->decay_gain = 0.15f + pos * 0.79f;
+        e->damp_coeff = 0.10f + (1.0f - pos) * 0.40f;
     } else if (slot == FX_DIFFUSION) {
-        e->diff_coeff = 0.3f + pos * 0.45f;
+        e->diff_coeff = 0.30f + pos * 0.45f;
     } else if (slot == FX_FILTER) {
         e->filter_pos = pos;
-        if (pos >= 0.4f && pos <= 0.6f) {
-            e->filter_mode = 0; /* Flat bypass */
-        } else if (pos < 0.4f) {
-            e->filter_mode = 1; /* Low-pass sweep */
-            float norm = pos / 0.4f; /* 0..1 */
-            float hz = 200.0f + norm * norm * 9800.0f;
+        if (pos >= 0.40f && pos <= 0.60f) {
+            e->filter_mode = 0; /* Flat neutral bypass */
+        } else if (pos < 0.40f) {
+            e->filter_mode = 1; /* Low-pass sweep down */
+            float norm = pos / 0.40f;
+            float hz = 180.0f + norm * norm * 9820.0f;
             fx_svf_lowpass(&e->svf_l, hz, 0.707f, e->cr);
             fx_svf_lowpass(&e->svf_r, hz, 0.707f, e->cr);
         } else {
-            e->filter_mode = 2; /* High-pass sweep */
-            float norm = (pos - 0.6f) / 0.4f; /* 0..1 */
-            float hz = 30.0f + norm * norm * 2500.0f;
+            e->filter_mode = 2; /* High-pass sweep up */
+            float norm = (pos - 0.60f) / 0.40f;
+            float hz = 30.0f + norm * norm * 2600.0f;
             fx_svf_highpass(&e->svf_l, hz, 0.707f, e->cr);
             fx_svf_highpass(&e->svf_r, hz, 0.707f, e->cr);
         }
@@ -120,17 +153,13 @@ void fx_set_bank2(fx_engine *e, int slot, float pos)
     e->bank2[slot] = pos;
 
     if (slot == 0) {
-        /* Mod Depth: 0 to 8 samples */
         e->mod_depth = pos * 8.0f;
     } else if (slot == 1) {
-        /* Mod Rate: 0.2 Hz to 4.5 Hz */
         float hz = 0.2f + pos * 4.3f;
         e->lfo_inc = 2.0f * FX_PI * hz / e->cr;
     } else if (slot == 2) {
-        /* Pre-delay: 0 to 150 ms (0 to 3600 samples at 24 kHz) */
         e->pre_len_target = (int)(pos * 3500.0f);
     } else if (slot == 3) {
-        /* Grit: 16-bit down to 8-bit quantization */
         e->grit_amt = pos;
         if (pos > 0.01f) {
             float bits = 16.0f - pos * 8.0f;
@@ -151,85 +180,35 @@ void fx_set_bank(fx_engine *e, int bank)
 int fx_latency(const fx_engine *e)
 {
     (void)e;
-    return HB_C + 2; /* Halfband latency */
+    return 11; /* 10-coeff half-band filter group delay at 48 kHz */
 }
 
-/* 48 kHz to 24 kHz downsampling via polyphase IIR */
-static inline float downsample_step(float in, float dy[HB_C], float *dx0, float *dx1, float *dfirst, int *dodd)
+/* 24 kHz Core Reverb Processor */
+static void core_process(fx_engine *e, float *l, float *r, int n)
 {
-    float x = in;
-    if (!*dodd) {
-        *dfirst = x;
-        *dodd = 1;
-        return 0.0f;
-    }
-    *dodd = 0;
-    float x0 = *dfirst;
-    float x1 = x;
+    while (n > 0) {
+        if (e->phase == 0) {
+            fx_set_fader(e, FX_MIX, e->fader[FX_MIX]);
+            fx_set_fader(e, FX_DECAY, e->fader[FX_DECAY]);
+            fx_set_fader(e, FX_DIFFUSION, e->fader[FX_DIFFUSION]);
+            fx_set_fader(e, FX_FILTER, e->fader[FX_FILTER]);
+        }
+        int m = FX_CHUNK - e->phase;
+        if (m > n) m = n;
 
-    /* Allpass stages */
-    for (int k = 0; k < HB_C; k += 2) {
-        float a = hb_coeffs[k];
-        float y = dy[k] + a * (x0 - dy[k]);
-        dy[k] = x0 + a * (dy[k] - x0);
-        x0 = y;
-    }
-    for (int k = 1; k < HB_C; k += 2) {
-        float a = hb_coeffs[k];
-        float y = dy[k] + a * (x1 - dy[k]);
-        dy[k] = x1 + a * (dy[k] - x1);
-        x1 = y;
-    }
-    *dx0 = x0;
-    *dx1 = x1;
-    return 0.5f * (x0 + x1);
-}
+        float mix_wet = e->mix_wet;
+        float mix_dry = e->mix_dry;
+        float decay_gain = e->decay_gain;
+        float diff_c = e->diff_coeff;
+        float damp_c = e->damp_coeff;
+        float mod_d = e->mod_depth;
 
-/* 24 kHz to 48 kHz upsampling via polyphase IIR */
-static inline void upsample_step(float in, float uy[HB_C], float *ux0, float *ux1, float usecond[2], float *out0, float *out1)
-{
-    float x0 = in, x1 = in;
-    for (int k = 0; k < HB_C; k += 2) {
-        float a = hb_coeffs[k];
-        float y = uy[k] + a * (x0 - uy[k]);
-        uy[k] = x0 + a * (uy[k] - x0);
-        x0 = y;
-    }
-    for (int k = 1; k < HB_C; k += 2) {
-        float a = hb_coeffs[k];
-        float y = uy[k] + a * (x1 - uy[k]);
-        uy[k] = x1 + a * (uy[k] - x1);
-        x1 = y;
-    }
-    *ux0 = x0;
-    *ux1 = x1;
-    *out0 = x0;
-    *out1 = x1;
-    usecond[0] = x1;
-}
+        for (int i = 0; i < m; i++) {
+            float in_l = l[i];
+            float in_r = r[i];
+            float mono_in = 0.5f * (in_l + in_r);
 
-void fx_process(fx_engine *e, float *l, float *r, int n)
-{
-    for (int i = 0; i < n; i++) {
-        /* Input warm saturation at 48 kHz */
-        float in_l = l[i];
-        float in_r = r[i];
-
-        in_l = fx_softclip(in_l * 1.05f);
-        in_r = fx_softclip(in_r * 1.05f);
-
-        /* Downsample to 24 kHz */
-        float core_l = downsample_step(in_l, e->dy[0], &e->dx0[0], &e->dx1[0], &e->dfirst[0], &e->dodd);
-        float core_r = downsample_step(in_r, e->dy[1], &e->dx0[1], &e->dx1[1], &e->dfirst[1], &e->dodd);
-
-        float out_core_l = 0.0f;
-        float out_core_r = 0.0f;
-
-        if (!e->dodd) {
-            /* Even 48kHz frame -> core 24kHz frame executes */
-            float mono_in = 0.5f * (core_l + core_r);
-
-            /* Pre-delay */
+            /* Pre-delay line */
             e->pre_buf[e->pre_wpos] = mono_in;
             int rpos = e->pre_wpos - e->pre_len_target;
             if (rpos < 0) rpos += PRE_DELAY_MAX;
@@ -237,12 +216,12 @@ void fx_process(fx_engine *e, float *l, float *r, int n)
             e->pre_wpos++;
             if (e->pre_wpos >= PRE_DELAY_MAX) e->pre_wpos = 0;
 
-            /* 4-stage input diffusion */
+            /* 4-stage input allpass diffusion */
             float diff = pre_out;
-            diff = allpass_filter(diff, e->ap_in_buf1, 389, &e->ap_in_idx[0], e->diff_coeff * 0.75f);
-            diff = allpass_filter(diff, e->ap_in_buf2, 293, &e->ap_in_idx[1], e->diff_coeff * 0.75f);
-            diff = allpass_filter(diff, e->ap_in_buf3, 203, &e->ap_in_idx[2], e->diff_coeff * 0.62f);
-            diff = allpass_filter(diff, e->ap_in_buf4, 151, &e->ap_in_idx[3], e->diff_coeff * 0.62f);
+            diff = allpass_step(diff, e->ap_in_buf1, 389, &e->ap_in_idx[0], diff_c * 0.70f);
+            diff = allpass_step(diff, e->ap_in_buf2, 293, &e->ap_in_idx[1], diff_c * 0.70f);
+            diff = allpass_step(diff, e->ap_in_buf3, 203, &e->ap_in_idx[2], diff_c * 0.60f);
+            diff = allpass_step(diff, e->ap_in_buf4, 151, &e->ap_in_idx[3], diff_c * 0.60f);
 
             /* LFO phase advance */
             e->lfo_phase1 += e->lfo_inc;
@@ -250,46 +229,43 @@ void fx_process(fx_engine *e, float *l, float *r, int n)
             e->lfo_phase2 += e->lfo_inc * 1.27f;
             if (e->lfo_phase2 >= 2.0f * FX_PI) e->lfo_phase2 -= 2.0f * FX_PI;
 
-            float mod1 = e->mod_depth * (1.0f + fx_softclip(e->lfo_phase1 - FX_PI) * 0.5f);
-            float mod2 = e->mod_depth * (1.0f + fx_softclip(e->lfo_phase2 - FX_PI) * 0.5f);
+            float mod1 = mod_d * (1.0f + (e->lfo_phase1 < FX_PI ? (e->lfo_phase1 / FX_PI - 0.5f) : (1.5f - e->lfo_phase1 / FX_PI)));
+            float mod2 = mod_d * (1.0f + (e->lfo_phase2 < FX_PI ? (e->lfo_phase2 / FX_PI - 0.5f) : (1.5f - e->lfo_phase2 / FX_PI)));
 
             /* Tank Cross-Coupled Loops */
             /* Left Loop */
-            float tank_in_l = diff + e->decay_gain * e->tank_d4_buf[e->tank_d4_idx];
-            float ap1_out = allpass_filter(tank_in_l, e->tank_ap1_buf, 877, &e->tank_ap1_idx, 0.5f);
+            float tank_in_l = diff + decay_gain * e->tank_d4_buf[e->tank_d4_idx];
+            float ap1_out = allpass_step(tank_in_l, e->tank_ap1_buf, 877, &e->tank_ap1_idx, 0.50f);
 
-            /* D1 with modulation */
             e->tank_d1_buf[e->tank_d1_idx] = ap1_out;
-            float d1_out = delay_read_linear(e->tank_d1_buf, 2111, e->tank_d1_idx, 1950.0f + mod1);
+            float d1_out = delay_read_interp(e->tank_d1_buf, 2111, e->tank_d1_idx, 1950.0f + mod1);
             e->tank_d1_idx++;
             if (e->tank_d1_idx >= 2111) e->tank_d1_idx = 0;
 
-            /* Damping 1-pole lowpass */
-            e->damp_l += e->damp_coeff * (d1_out - e->damp_l);
+            e->damp_l += damp_c * (d1_out - e->damp_l);
             e->tank_d2_buf[e->tank_d2_idx] = e->damp_l;
             float d2_out = e->tank_d2_buf[e->tank_d2_idx];
             e->tank_d2_idx++;
             if (e->tank_d2_idx >= 1789) e->tank_d2_idx = 0;
 
             /* Right Loop */
-            float tank_in_r = diff + e->decay_gain * d2_out;
-            float ap2_out = allpass_filter(tank_in_r, e->tank_ap2_buf, 907, &e->tank_ap2_idx, 0.5f);
+            float tank_in_r = diff + decay_gain * d2_out;
+            float ap2_out = allpass_step(tank_in_r, e->tank_ap2_buf, 907, &e->tank_ap2_idx, 0.50f);
 
-            /* D3 with modulation */
             e->tank_d3_buf[e->tank_d3_idx] = ap2_out;
-            float d3_out = delay_read_linear(e->tank_d3_buf, 2341, e->tank_d3_idx, 2180.0f + mod2);
+            float d3_out = delay_read_interp(e->tank_d3_buf, 2341, e->tank_d3_idx, 2180.0f + mod2);
             e->tank_d3_idx++;
             if (e->tank_d3_idx >= 2341) e->tank_d3_idx = 0;
 
-            /* Damping 1-pole lowpass */
-            e->damp_r += e->damp_coeff * (d3_out - e->damp_r);
+            e->damp_r += damp_c * (d3_out - e->damp_r);
             e->tank_d4_buf[e->tank_d4_idx] = e->damp_r;
+            float d4_out = e->tank_d4_buf[e->tank_d4_idx];
             e->tank_d4_idx++;
             if (e->tank_d4_idx >= 1993) e->tank_d4_idx = 0;
 
             /* Stereo Reverb Wet Output */
-            float wet_l = 0.6f * (d1_out - d3_out);
-            float wet_r = 0.6f * (d2_out + d3_out);
+            float wet_l = 0.55f * (d1_out - d3_out);
+            float wet_r = 0.55f * (d2_out + d4_out);
 
             /* Tone shaping filter */
             if (e->filter_mode != 0) {
@@ -297,36 +273,112 @@ void fx_process(fx_engine *e, float *l, float *r, int n)
                 wet_r = fx_svf_run(&e->svf_r, &e->svf_st_r, wet_r);
             }
 
-            /* Vintage 12-bit / 8-bit DAC decimation (Grit) */
+            /* Vintage DAC quantization (Grit) */
             if (e->grit_step > 0.0f) {
                 wet_l = (float)(int)(wet_l * e->inv_grit_step) * e->grit_step;
                 wet_r = (float)(int)(wet_r * e->inv_grit_step) * e->grit_step;
             }
 
-            /* Dry / Wet Mix */
-            if (e->fader[FX_MIX] <= 0.001f) {
-                /* Zero mix: clear old tail accumulator to ensure clean silence */
-                out_core_l = core_l;
-                out_core_r = core_r;
+            /* Output Mix */
+            if (mix_wet <= 0.001f) {
+                l[i] = in_l;
+                r[i] = in_r;
             } else {
-                out_core_l = core_l * e->mix_dry + wet_l * e->mix_wet;
-                out_core_r = core_r * e->mix_dry + wet_r * e->mix_wet;
+                l[i] = in_l * mix_dry + wet_l * mix_wet;
+                r[i] = in_r * mix_dry + wet_r * mix_wet;
             }
         }
 
-        /* Upsample back to 48 kHz */
-        float up_l0, up_l1, up_r0, up_r1;
-        upsample_step(out_core_l, e->uy[0], &e->ux0[0], &e->ux1[0], e->usecond, &up_l0, &up_l1);
-        upsample_step(out_core_r, e->uy[1], &e->ux0[1], &e->ux1[1], e->usecond, &up_r0, &up_r1);
+        e->phase = (e->phase + m) % FX_CHUNK;
+        l += m; r += m; n -= m;
+    }
+}
 
-        float final_l = e->dodd ? up_l0 : up_l1;
-        float final_r = e->dodd ? up_r0 : up_r1;
+/* Processes outside 48 kHz audio up to 2 * FX_CHUNK frames */
+STAGE static void fx_piece(fx_engine *e, float *l, float *r, int n)
+{
+    float pa[2][FX_CHUNK + 1], pb[2][FX_CHUNK + 1];
+    int nc = 0;
 
-        /* Lookahead safety ceiling at -0.3 dBFS */
-        final_l = fx_clampf(final_l, -0.966f, 0.966f);
-        final_r = fx_clampf(final_r, -0.966f, 0.966f);
+    /* Input warm stage: gentle treble dip and paired sample accumulation */
+    {
+        const float wc = e->warm_c;
+        float w0 = e->warm_lp[0], w1 = e->warm_lp[1];
+        int odd = e->dodd;
+        for (int i = 0; i < n; i++) {
+            float x0 = l[i], x1 = r[i];
+            w0 += wc * (x0 - w0);
+            w1 += wc * (x1 - w1);
+            x0 += 0.25f * (w0 - x0);
+            x1 += 0.25f * (w1 - x1);
+            if (odd) {
+                pa[0][nc] = x0; pb[0][nc] = e->dfirst[0];
+                pa[1][nc] = x1; pb[1][nc] = e->dfirst[1];
+                nc++;
+            } else {
+                e->dfirst[0] = x0; e->dfirst[1] = x1;
+            }
+            odd ^= 1;
+        }
+        e->warm_lp[0] = w0; e->warm_lp[1] = w1; e->dodd = odd;
+    }
 
-        l[i] = final_l;
-        r[i] = final_r;
+    /* 48 -> 24 kHz decimation */
+    float cl[FX_CHUNK + 1], crr[FX_CHUNK + 1];
+    for (int c = 0; c < 2; c++) {
+        hb_run(pa[c], pb[c], nc, e->dy[c], &e->dx0[c], &e->dx1[c]);
+        float *o = c ? crr : cl;
+        for (int k = 0; k < nc; k++) {
+            float x = 0.5f * (pa[c][k] + pb[c][k]);
+            /* Gentle warm stage saturation at 24 kHz */
+            o[k] = x + 0.5f * (fx_softclip(1.4f * x) * 0.71428571f - x);
+        }
+    }
+
+    /* Process DSP Reverb Core at 24 kHz */
+    core_process(e, cl, crr, nc);
+
+    /* 24 -> 48 kHz interpolation */
+    for (int c = 0; c < 2; c++) {
+        const float *in = c ? crr : cl;
+        for (int k = 0; k < nc; k++) pa[c][k] = pb[c][k] = in[k];
+        hb_run(pa[c], pb[c], nc, e->uy[c], &e->ux0[c], &e->ux1[c]);
+    }
+
+    {
+        int odd = e->uodd, k = 0;
+        float max_gr = 0.0f;
+        for (int i = 0; i < n; i++) {
+            float o0, o1;
+            if (odd) {
+                o0 = pa[0][k]; o1 = pa[1][k];
+                e->usecond[0] = pb[0][k]; e->usecond[1] = pb[1][k];
+                k++;
+            } else {
+                o0 = e->usecond[0]; o1 = e->usecond[1];
+            }
+            odd ^= 1;
+
+            /* Peak limiter ceiling at -0.3 dBFS */
+            if (o0 > 0.966f) { if (o0 - 0.966f > max_gr) max_gr = o0 - 0.966f; o0 = 0.966f; }
+            else if (o0 < -0.966f) { if (-0.966f - o0 > max_gr) max_gr = -0.966f - o0; o0 = -0.966f; }
+
+            if (o1 > 0.966f) { if (o1 - 0.966f > max_gr) max_gr = o1 - 0.966f; o1 = 0.966f; }
+            else if (o1 < -0.966f) { if (-0.966f - o1 > max_gr) max_gr = -0.966f - o1; o1 = -0.966f; }
+
+            l[i] = o0;
+            r[i] = o1;
+        }
+        e->uodd = odd;
+        if (max_gr > e->limiter.meter) e->limiter.meter = max_gr;
+    }
+}
+
+void fx_process(fx_engine *e, float *l, float *r, int n)
+{
+    while (n > 0) {
+        int m = n < 2 * FX_CHUNK ? n : 2 * FX_CHUNK;
+        fx_piece(e, l, r, m);
+        l += m; r += m; n -= m;
     }
 }

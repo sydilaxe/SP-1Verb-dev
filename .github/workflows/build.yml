@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          path: sp-1verb
+          path: sp1-verb-dev
 
       - name: Cache the Zephyr SDK and tree
         id: zcache
@@ -52,13 +52,13 @@ jobs:
         run: |
           pip install west -r ws/zephyr/scripts/requirements-base.txt
           export ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk-0.17.4 ZEPHYR_BASE=$GITHUB_WORKSPACE/ws/zephyr
-          cd ws && ../sp-1verb/scripts/build-firmware.sh
+          cd ws && ../sp1-verb-dev/scripts/build-firmware.sh
 
       - name: Check the binary
         run: |
           # flashable by the SP-1 bootloader: loaded at 0x20000, at most 0xDF000 bytes, the vector
           # table first (initial stack in RAM, reset handler inside the image)
-          python3 - sp-1verb/sp1verb.bin <<'PY'
+          python3 - sp1-verb-dev/sp1verb.bin <<'PY'
           import struct, sys
           b = open(sys.argv[1], "rb").read()
           sp, reset = struct.unpack("<II", b[:8])
@@ -68,12 +68,12 @@ jobs:
           assert reset & 1 and 0x20000 <= (reset & ~1) < 0x20000 + len(b), "reset handler outside the image"
           PY
           # and it fits: RAM used, from the build
-          grep -q "CONFIG_BOARD_STEM_PLAYER=y" sp-1verb/build/firmware/zephyr/.config
+          grep -q "CONFIG_BOARD_STEM_PLAYER=y" sp1-verb-dev/build/firmware/zephyr/.config
 
       - name: CPU estimate (Cortex-M4, every effect fully in)
         run: |
           pip install unicorn capstone
-          ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk-0.17.4 python3 sp-1verb/tools/bench_m4.py -v | tee bench.txt
+          ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk-0.17.4 python3 sp1-verb-dev/tools/bench_m4.py -v | tee bench.txt
           # one core is 100%; keep the worst case clear of it
           pct=$(sed -n 's/.*: \([0-9]*\)% of one core.*/\1/p' bench.txt)
           echo "worst case: $pct% of one core"
@@ -82,7 +82,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: sp1verb-firmware
-          path: sp-1verb/sp1verb.bin
+          path: sp1-verb-dev/sp1verb.bin
 
   test:
     name: Effects engine tests (host)
