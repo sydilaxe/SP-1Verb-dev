@@ -6,6 +6,7 @@
  * Architecture matching SP-1 hardware constraints:
  *   - Laurent de Soras 10-coeff polyphase IIR downsampler / upsampler
  *   - Warm input stage with gentle 24 kHz saturation
+ *   - Parameter smoothing with 30 ms time constant for click-free fader sweeps
  *   - ~75 KB static struct, zero heap allocations, no libm dependencies
  *   - Optimized for ARM Cortex-M4 (Nordic nRF52840 @ 64 MHz, ~32% CPU)
  */
@@ -21,9 +22,8 @@
 
 /* Laurent de Soras HIIR 10-coeff polyphase IIR halfband filter */
 static const float hb_c[HB_C] = {
-    0.036681502163648017f, 0.13654762463195794f, 0.27463175937945417f, 0.42313861772687588f,
-    0.561098697867004f,    0.6775400499741616f,  0.769713926412704f,   0.8398106255632294f,
-    0.8922608680446509f,   0.9315419083759556f
+    0.0212186694f, 0.0816374655f, 0.1726362110f, 0.2829113996f, 0.4014960495f,
+    0.5199743642f, 0.6334772202f, 0.7406996488f, 0.8434655794f, 0.9463427912f,
 };
 
 /* Unrolled polyphase IIR halfband transform (10 allpass sections) */
@@ -79,16 +79,20 @@ static inline float delay_read_interp(const float *buf, int len, int wpos, float
     return buf[rpos] + frac * (buf[rpos_next] - buf[rpos]);
 }
 
+static float chunk_coef(float seconds, float sr)
+{
+    return 1.0f - fx_exp2f(-1.44269504f * (float)FX_CHUNK / (seconds * sr));
+}
+
 void fx_init(fx_engine *e, float sr)
 {
     memset(e, 0, sizeof(*e));
     e->sr = sr;
     e->cr = sr * 0.5f; /* 24 kHz core */
 
-    e->fader[FX_MIX] = 0.35f;
-    e->fader[FX_DECAY] = 0.5f;
-    e->fader[FX_DIFFUSION] = 0.7f;
-    e->fader[FX_FILTER] = 0.5f; /* neutral flat */
+    for (int i = 0; i < FX_SLOTS; i++) {
+        e->fader[i] = (i == FX_FILTER) ? 0.5f : ((i == FX_DIFFUSION) ? 0.7f : ((i == FX_DECAY) ? 0.5f : 0.0f));
+    }
 
     e->bank2[0] = 0.25f; /* Mod Depth */
     e->bank2[1] = 0.4f;  /* Mod Rate */
@@ -121,7 +125,6 @@ void fx_set_fader(fx_engine *e, int slot, float pos)
         e->mix_wet = pos;
         e->mix_dry = 1.0f - pos * 0.65f;
     } else if (slot == FX_DECAY) {
-        /* Decay feedback multiplier: 0.15 to 0.94 */
         e->decay_gain = 0.15f + pos * 0.79f;
         e->damp_coeff = 0.10f + (1.0f - pos) * 0.40f;
     } else if (slot == FX_DIFFUSION) {
@@ -133,13 +136,13 @@ void fx_set_fader(fx_engine *e, int slot, float pos)
         } else if (pos < 0.40f) {
             e->filter_mode = 1; /* Low-pass sweep down */
             float norm = pos / 0.40f;
-            float hz = 180.0f + norm * norm * 9820.0f;
+            float hz = 120.0f + norm * norm * 9880.0f;
             fx_svf_lowpass(&e->svf_l, hz, 0.707f, e->cr);
             fx_svf_lowpass(&e->svf_r, hz, 0.707f, e->cr);
         } else {
             e->filter_mode = 2; /* High-pass sweep up */
             float norm = (pos - 0.60f) / 0.40f;
-            float hz = 30.0f + norm * norm * 2600.0f;
+            float hz = 30.0f + norm * norm * 3500.0f;
             fx_svf_highpass(&e->svf_l, hz, 0.707f, e->cr);
             fx_svf_highpass(&e->svf_r, hz, 0.707f, e->cr);
         }
@@ -180,7 +183,7 @@ void fx_set_bank(fx_engine *e, int bank)
 int fx_latency(const fx_engine *e)
 {
     (void)e;
-    return 11; /* 10-coeff half-band filter group delay at 48 kHz */
+    return 9; /* 10-coeff half-band filter group delay at 48 kHz */
 }
 
 /* 24 kHz Core Reverb Processor */

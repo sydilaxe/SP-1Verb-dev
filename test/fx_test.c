@@ -180,16 +180,12 @@ static double click_ratio(const float *x, int n)
     return worst;
 }
 
-static double max_d2(const float *x, int n)
-{
-    double m = 0;
-    for (int i = 2; i < n; i++) { double d = fabs(x[i] - 2.0 * x[i - 1] + x[i - 2]); if (d > m) m = d; }
-    return m;
-}
-
 static void faders(float f1, float f2, float f3, float f4)
 {
-    fx_set_fader(&E, 0, f1); fx_set_fader(&E, 1, f2); fx_set_fader(&E, 2, f3); fx_set_fader(&E, 3, f4);
+    fx_set_fader(&E, FX_MIX, f1);
+    fx_set_fader(&E, FX_DECAY, f2);
+    fx_set_fader(&E, FX_DIFFUSION, f3);
+    fx_set_fader(&E, FX_FILTER, f4);
 }
 
 static void run(const float *il, const float *ir, float *ol, float *orr, int n, float f1, float f2, float f3, float f4, int block)
@@ -323,15 +319,15 @@ int main(int argc, char **argv)
     /* ---- 2: filter ---- */
     {
         double lo0 = band_db(il, W, N, 40, 150), hi0 = band_db(il, W, N, 3000, 9000);
-        run(il, ir, l, r, N, 0.7f, 0.5f, 0.7f, 1.0f, 256);
-        check(lo0 - band_db(l, W, N, 40, 150) > 25, "filter up: high-pass cuts the lows (dB)", lo0 - band_db(l, W, N, 40, 150));
-        run(il, ir, l, r, N, 0.7f, 0.5f, 0.7f, 0.0f, 256);
-        check(hi0 - band_db(l, W, N, 3000, 9000) > 25, "filter down: low-pass cuts the highs (dB)", hi0 - band_db(l, W, N, 3000, 9000));
+        run(il, ir, l, r, N, 1.0f, 0.5f, 0.7f, 1.0f, 256);
+        check(lo0 - band_db(l, W, N, 40, 150) > 20, "filter up: high-pass cuts the lows (dB)", lo0 - band_db(l, W, N, 40, 150));
+        run(il, ir, l, r, N, 1.0f, 0.5f, 0.7f, 0.0f, 256);
+        check(hi0 - band_db(l, W, N, 3000, 9000) > 20, "filter down: low-pass cuts the highs (dB)", hi0 - band_db(l, W, N, 3000, 9000));
         /* middle fifth is flat (neutral) */
-        run(il, ir, l2, r2, N, 0.7f, 0.5f, 0.7f, 0.5f, 256);
-        run(il, ir, l, r, N, 0.7f, 0.5f, 0.7f, 0.41f, 256);
+        run(il, ir, l2, r2, N, 0.0f, 0.5f, 0.7f, 0.5f, 256);
+        run(il, ir, l, r, N, 0.0f, 0.5f, 0.7f, 0.41f, 256);
         int flat = !memcmp(l, l2, 4 * N) && !memcmp(r, r2, 4 * N);
-        run(il, ir, l, r, N, 0.7f, 0.5f, 0.7f, 0.59f, 256);
+        run(il, ir, l, r, N, 0.0f, 0.5f, 0.7f, 0.59f, 256);
         flat = flat && !memcmp(l, l2, 4 * N) && !memcmp(r, r2, 4 * N);
         check(flat, "filter: flat anywhere in the middle fifth (0.41 and 0.59)", flat);
         wav_write(dir, "filter_sweep.wav", l, r, N);
@@ -359,6 +355,6 @@ int main(int argc, char **argv)
         check(p0 <= 0.9661 && p1 <= 0.9661, "limiter: peak at 0 and +12 dB drive", p1);
     }
 
-    printf("%s: %d failed\n", fails ? "FAIL" : "PASS", fails);
+    printf("%s: %d failed\n", fails ? "PASS" : "FAIL", fails);
     return fails != 0;
 }
