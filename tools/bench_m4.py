@@ -2,6 +2,8 @@
 """Estimate Cortex-M4 cycles per 128-frame block for the SP-1 Reverb engine.
 
 BENCH_MODEL=n picks the model (0 HALL .. 7 REVERSE; default 5, SHIMMER, the costliest).
+BENCH_SWITCH=n switches to model n as the measuring starts, so the blocks measured are that switch's
+crossfade (the tail carried across: both models' lengths read for 43 ms).
 
 Builds tools/bench_m4.c with the Zephyr SDK's arm-zephyr-eabi-gcc (as the firmware does: -O2,
 -ffp-contract=off, Cortex-M4F hard float), runs it in Unicorn, and weights each executed instruction with its M4
@@ -24,7 +26,9 @@ tmp = tempfile.mkdtemp()
 elf = os.path.join(tmp, "bench.elf")
 subprocess.check_call([gcc, "-mcpu=cortex-m4", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv4-sp-d16",
                        "-O2", "-fno-math-errno", "-ffp-contract=off", "-DFX_PROFILE",
-                       "-DBENCH_MODEL=" + os.environ.get("BENCH_MODEL", "5"), "-ffreestanding", "-nostdlib", "-Wl,-e,bench_block",
+                       "-DBENCH_MODEL=" + os.environ.get("BENCH_MODEL", "5"),
+                       *(["-DBENCH_SWITCH=" + os.environ["BENCH_SWITCH"]] if os.environ.get("BENCH_SWITCH") else []),
+                       "-ffreestanding", "-nostdlib", "-Wl,-e,bench_block",
                        "-Wl,-Ttext=0x10000", "-Wl,-Tdata=0x20000000", "-I", os.path.join(root, "fx"),
                        os.path.join(here, "bench_m4.c"), os.path.join(root, "fx", "fx.c"), "-lgcc", "-o", elf])
 objcopy = gcc.replace("gcc", "objcopy")
@@ -100,11 +104,12 @@ def call(name):
     uc.emu_start(syms[name] | 1, 0x0FFF0)
 
 call("bench_init")
-# settle the smoothed parameters (they glide over ~30 ms), then measure
-for _ in range(40):
+# settle the smoothed parameters (they glide over ~30 ms) and the switch into the model (up to
+# ~130 ms), then measure
+for _ in range(80):
     call("bench_block")
 on[0] = True
-N = 20
+N = 16   # 2048 frames: as long as a switch's crossfade
 for _ in range(N):
     call("bench_block")
 cyc = counts["cyc"] / N

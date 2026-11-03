@@ -45,6 +45,20 @@ static inline float allpass(float in, float *buf, int len, int *idx, float c)
     return d - c * v;
 }
 
+/* the tank's allpasses: a ring of TK_APM, written at *w and read len back; XF also reads nlen
+ * back and blends toward it by g (a switch's crossfade) */
+static inline __attribute__((always_inline))
+float allpass_t(float in, float *buf, int *w, int len, float c, const int XF, int nlen, float g)
+{
+    int i = *w;
+    float d = buf[(i - len) & (TK_APM - 1)];
+    if (XF) d += g * (buf[(i - nlen) & (TK_APM - 1)] - d);
+    float v = in + c * d;
+    buf[i] = v;
+    *w = (i + 1) & (TK_APM - 1);
+    return d - c * v;
+}
+
 /* written at w, read `delay` frames back (fractional) */
 static inline float tap(const float *buf, int len, int w, float delay)
 {
@@ -113,6 +127,8 @@ float fx_decay_seconds(int model, float pos)
 #define SPR_CRASH_T 0.20f    /* only a hard hit well over the recent level crashes the springs */
 #define SPR_CRASH_G 1.2f     /* and this much rattle per unit over */
 
+static void model_lengths(fx_engine *e, const model_t *m);
+
 static void model_apply(fx_engine *e, int model)
 {
     const model_t *m = &MODELS[model];
@@ -124,6 +140,7 @@ static void model_apply(fx_engine *e, int model)
     __builtin_memset(e->t_d2, 0, sizeof e->t_d2); __builtin_memset(e->t_ap2, 0, sizeof e->t_ap2);
     __builtin_memset(e->t_d3, 0, sizeof e->t_d3); __builtin_memset(e->t_d4, 0, sizeof e->t_d4);
     __builtin_memset(e->sh_buf, 0, sizeof e->sh_buf);
+    e->sh_lp = 0.0f;
     __builtin_memset(e->pre, 0, sizeof e->pre);   /* the pre-delay too: the old input would be a step */
     __builtin_memset(e->sp_d, 0, sizeof e->sp_d);
     e->sp_in = (fx_svf_state){0}; __builtin_memset(e->sp_y, 0, sizeof e->sp_y);
@@ -146,7 +163,15 @@ static void model_apply(fx_engine *e, int model)
     e->k_det = e->k_slow = e->k_env = 0.0f; e->k_t = 1 << 30; e->k_run = 0;
     e->f_st[0] = e->f_st[1] = (fx_svf_state){0};
     e->g_env = 0.0f;
+    e->xf_n = 0; e->xf_stage = 0;
+    e->sh_g = (m->flags & M_SHIMMER) ? 1.0f : 0.0f; e->sh_prime = 0;
+    model_lengths(e, m);
+    e->ds1 = e->ds3 = e->depth_scale;
+}
 
+/* the tank's lengths and settings for a model */
+static void model_lengths(fx_engine *e, const model_t *m)
+{
     float s = m->size;
     static const int ap_full[4] = { AP_IN1, AP_IN2, AP_IN3, AP_IN4 };
     for (int k = 0; k < 4; k++) {
@@ -164,6 +189,38 @@ static void model_apply(fx_engine *e, int model)
     e->depth_scale = m->depth_scale;
 }
 
+/* The models whose tail can carry across a switch: they share the tank, and only its lengths
+ * and settings differ. SPRING, GATED and REVERSE fade instead (a gate would cut the tail anyway,
+ * and its envelope on top of the crossfade would cost more than any model on its own). */
+#define XF_STAGE 32      /* each length's crossfade: 32 chunks, 21 ms */
+#define XF_STAGES 6      /* the tank's six lengths, in turn: the whole switch 128 ms */
+static int carries(int from, int to)
+{
+    const int plain = M_TANK | M_SHIMMER;
+    return !(MODELS[from].flags & ~plain) && !(MODELS[to].flags & ~plain);
+}
+
+static void model_carry(fx_engine *e, int model)
+{
+    const model_t *m = &MODELS[model], *o = &MODELS[e->model];
+    const int d2 = e->n_d2, d4 = e->n_d4, x1 = e->n_tap1x, x2 = e->n_tap2x, t1 = e->n_tap1, t2 = e->n_tap2;
+    e->o_tank_c = e->tank_c; e->o_diff_scale = o->diff_scale;
+    e->o_fb = e->fb; e->o_damp_c = e->damp_c; e->o_trim = o->trim;
+    if ((m->flags & M_SHIMMER) && !(o->flags & M_SHIMMER)) e->sh_prime = 2 * XF_STAGE;  /* fill its window first */
+    e->model = model;
+    model_lengths(e, m);
+    /* the input diffusers take their new lengths at once (they hold only the last few ms of the
+     * input); the tank's six lengths crossfade, one at a time */
+    for (int k = 0; k < 4; k++) if (e->ap_i[k] >= e->n_ap[k]) e->ap_i[k] = 0;
+    e->nx_tap1 = e->n_tap1; e->nx_tap2 = e->n_tap2;
+    e->n_tap1 = t1; e->n_tap2 = t2;
+    e->nx_d2 = e->n_d2; e->nx_d4 = e->n_d4; e->nx_tap1x = e->n_tap1x; e->nx_tap2x = e->n_tap2x;
+    e->nx_ds = e->depth_scale;
+    e->n_d2 = d2; e->n_d4 = d4; e->n_tap1x = x1; e->n_tap2x = x2;
+    e->xf_stage = 1;
+    e->xf_n = XF_STAGE;
+}
+
 void fx_set_model(fx_engine *e, int model)
 {
     if (model >= 0 && model < FX_MODELS) e->model_next = model;
@@ -177,8 +234,32 @@ STAGE static void control(fx_engine *e)
 {
     const float sr = e->sr, k30 = chunk_coef(0.03f, sr);
 
-    /* a model change: fade the reverb out (about 20 ms), swap it, fade back in */
-    if (e->model_next != e->model) {
+    /* a model change: carry the tail into the new model, crossfading the tank's lengths; or
+     * fade the reverb out (about 20 ms), swap it, fade back in */
+    /* (out of SHIMMER, its octave fades first: the two at once would cost too much) */
+    const int carry = e->model_next != e->model && e->swg == 1.0f && carries(e->model, e->model_next);
+    if (carry && e->xf_stage == 0 && !((MODELS[e->model].flags & M_SHIMMER) && e->sh_g != 0.0f))
+        model_carry(e, e->model_next);
+    if (e->xf_stage && e->xf_n == 0) {   /* that read is at its new length: on to the next */
+        switch (e->xf_stage) {
+        case 1: e->n_tap1 = e->nx_tap1; break;
+        case 2: e->n_d4 = e->nx_d4; break;
+        case 3: e->n_tap1x = e->nx_tap1x; e->ds1 = e->nx_ds; break;
+        case 4: e->n_d2 = e->nx_d2; break;
+        case 5: e->n_tap2 = e->nx_tap2; break;
+        case 6: e->n_tap2x = e->nx_tap2x; e->ds3 = e->nx_ds; break;
+        }
+        e->xf_stage = e->xf_stage < XF_STAGES ? e->xf_stage + 1 : 0;
+        e->xf_n = e->xf_stage ? XF_STAGE : 0;
+    }
+    e->xf_on = e->xf_stage != 0;
+    if (e->xf_on) {             /* the new length's weight ramps 0 to 1 across the stage's chunks */
+        e->xg = (float)(XF_STAGE - e->xf_n) * (1.0f / XF_STAGE);
+        e->xs = 1.0f / (float)(XF_STAGE * FX_CHUNK);
+        /* and the whole switch's progress, for the loop's gain and coefficients */
+        e->xp = ((float)(e->xf_stage - 1) + e->xg) * (1.0f / XF_STAGES);
+        e->xf_n--;
+    } else if (e->model_next != e->model && !carry) {
         e->swg -= 1.0f / 30.0f;
         if (e->swg <= 0.0f) {
             e->swg = 0.0f;
@@ -190,6 +271,17 @@ STAGE static void control(fx_engine *e)
     }
     const model_t *m = &MODELS[e->model];
 
+    /* SHIMMER's octave comes and goes over 43 ms on a carried switch: in, once the lengths are
+     * across and then its window is full; out, before the lengths move */
+    if ((m->flags & M_SHIMMER) && e->model_next == e->model) {
+        if (e->xf_stage) ;
+        else if (e->sh_prime > 0) e->sh_prime--;
+        else if (e->sh_g < 1.0f) { e->sh_g += 0.5f / XF_STAGE; if (e->sh_g > 1.0f) e->sh_g = 1.0f; }
+    } else {
+        e->sh_prime = 0;
+        if (e->sh_g > 0.0f) { e->sh_g -= 0.5f / XF_STAGE; if (e->sh_g < 1e-4f) e->sh_g = 0.0f; }
+    }
+
     e->mix = glide(e->mix, e->fader[FX_MIX], k30);
     e->decay = glide(e->decay, e->fader[FX_DECAY], k30);
     e->diffusion = glide(e->diffusion, e->fader[FX_DIFFUSION], k30);
@@ -200,7 +292,9 @@ STAGE static void control(fx_engine *e)
 
     /* the mix, constant power; ramped across the chunk, landing exactly on the targets */
     e->dry_t = fx_sqrtf(1.0f - e->mix);
-    e->wet_t = fx_sqrtf(e->mix) * e->swg * m->trim;
+    float trim = m->trim;
+    if (e->xf_on) trim = e->o_trim + (e->xp + 1.0f / (XF_STAGES * XF_STAGE)) * (trim - e->o_trim);   /* where this chunk ends */
+    e->wet_t = fx_sqrtf(e->mix) * e->swg * trim;
     e->dry_step = (e->dry_t - e->dry_g) * (1.0f / FX_CHUNK);
     e->wet_step = (e->wet_t - e->wet_g) * (1.0f / FX_CHUNK);
     /* the reverb's input follows the switch fade, so a fresh model never starts on a step */
@@ -212,7 +306,7 @@ STAGE static void control(fx_engine *e)
     const float ssr = sr / (float)SPR_DOWN;                         /* the springs' rate */
     float loop = (m->flags & M_SPRING) ? (float)(SPR_L1 + SPR_LOOP) / ssr : HALF_LOOP_S * e->size;
     e->fb = fx_exp2f(-9.9657843f * loop / rt);                       /* 10^(-3 T / RT60) */
-    if ((m->flags & M_SHIMMER) && e->fb > 0.93f) e->fb = 0.93f;       /* the octave adds energy */
+    if ((m->flags & M_SHIMMER) && e->fb > 0.96f) e->fb = 0.96f;       /* the octave adds energy */
     /* the spring's loop is short: the same darkening per trip would kill its tail */
     float fc = (m->flags & M_SPRING) ? m->damp_hz : m->damp_hz * fx_exp2f(-1.3f * e->decay);
     e->damp_c = 1.0f - fx_exp2f(-1.44269504f * 2.0f * FX_PI * fc / ((m->flags & M_SPRING) ? ssr : sr));
@@ -221,7 +315,16 @@ STAGE static void control(fx_engine *e)
         e->sp_oc = 1.0f - fx_exp2f(-1.44269504f * 2.0f * FX_PI * 220.0f / ssr);   /* the pickup: thin lows */
         e->sp_a = -(0.60f + 0.2f * e->diffusion);   /* negative: the lows arrive last */
     }
-    e->diff_c = fx_clampf((0.30f + 0.45f * e->diffusion) * m->diff_scale, 0.0f, 0.85f);
+    float ds = m->diff_scale;
+    if (e->xf_on) {             /* a carried switch: the loop's gain and coefficients glide across */
+        e->fb = e->o_fb + e->xp * (e->fb - e->o_fb);
+        e->damp_c = e->o_damp_c + e->xp * (e->damp_c - e->o_damp_c);
+        ds = e->o_diff_scale + e->xp * (ds - e->o_diff_scale);
+        e->tank_c = e->o_tank_c + e->xp * (m->tank_c - e->o_tank_c);
+    } else {
+        e->tank_c = m->tank_c;
+    }
+    e->diff_c = fx_clampf((0.30f + 0.45f * e->diffusion) * ds, 0.0f, 0.85f);
     e->lfo_inc = (0.2f + 4.3f * e->param2[FX_MOD_RATE]) / sr;
     if (m->flags & (M_GATE | M_REVERSE)) {
         e->k_len = (int)(fx_decay_seconds(e->model, e->decay) * sr);
@@ -270,60 +373,90 @@ static inline float tank_input(fx_engine *e, float in, float c1, float c2, float
     return allpass(x, e->ap4, e->n_ap[3], &e->ap_i[3], c2);
 }
 
-/* SHIMMER: an octave up, two read heads sweeping a window, crossfaded */
-static inline float shimmer(fx_engine *e, float x)
+/* SHIMMER: an octave up, two read heads sweeping a window, crossfaded. Its state is passed in
+ * so the tank's loop keeps it in registers. */
+#define SH_HP_C 0.0130f   /* its high-pass: 100 Hz at 48 kHz, 1 - e^(-2 pi 100 / 48000) */
+static inline __attribute__((always_inline))
+float shimmer(float *buf, float x, int *pw, float *pph, float *plp)
 {
-    int w = e->sh_w;
-    e->sh_buf[w] = x;
-    float ph = e->sh_ph + 1.0f / (float)SH_LEN;
+    int w = *pw;
+    buf[w] = x;
+    float ph = *pph + 1.0f / (float)SH_LEN;
     if (ph >= 1.0f) ph -= 1.0f;
-    e->sh_ph = ph;
+    *pph = ph;
     float ph2 = ph + 0.5f; if (ph2 >= 1.0f) ph2 -= 1.0f;
     /* the delay shrinks by a frame each frame: read at twice the speed */
     float d1 = (float)(SH_LEN - 2) * (1.0f - ph) + 1.0f, d2 = (float)(SH_LEN - 2) * (1.0f - ph2) + 1.0f;
+    int i1 = (int)d1, i2 = (int)d2;
+    float f1 = d1 - (float)i1, f2 = d2 - (float)i2;
+    int a1 = (w - i1) & (SH_LEN - 1), a2 = (w - i2) & (SH_LEN - 1);   /* SH_LEN is a power of 2 */
+    float y1 = buf[a1] + f1 * (buf[(a1 - 1) & (SH_LEN - 1)] - buf[a1]);
+    float y2 = buf[a2] + f2 * (buf[(a2 - 1) & (SH_LEN - 1)] - buf[a2]);
     /* windows ~ sin(pi ph) and its half-turn: their powers add to about 1 */
-    float y = tap(e->sh_buf, SH_LEN, w, d1) * (4.0f * ph * (1.0f - ph))
-            + tap(e->sh_buf, SH_LEN, w, d2) * (4.0f * ph2 * (1.0f - ph2));
-    e->sh_w = w + 1 < SH_LEN ? w + 1 : 0;
-    return y;
+    float y = y1 * (4.0f * ph * (1.0f - ph)) + y2 * (4.0f * ph2 * (1.0f - ph2));
+    *pw = (w + 1) & (SH_LEN - 1);
+    /* no lows back round the loop: an octave up of the lows is still low (DC is DC), and the
+     * windows sum to more than 1 there, so with DECAY high they built up without end */
+    float lp = *plp + SH_HP_C * (y - *plp);
+    *plp = lp;
+    return y - lp;
 }
 
-STAGE static void reverb_tank(fx_engine *e, const float *l, const float *r, float *wl, float *wr, int n)
+/* The tank. XF: a carried switch is under way, so every length is read twice, the old model's
+ * and the new one's, and blended (g1 the new's weight, a straight line from 0 to 1): the sound
+ * already in the tank never jumps. */
+static inline __attribute__((always_inline))
+void tank_run(fx_engine *e, const float *l, const float *r, float *wl, float *wr, int n, const int XF, const int SH)
 {
     const float fb = e->fb, dc = e->damp_c, c1 = e->diff_c, c2 = e->diff_c * 0.83f, tc = e->tank_c;
-    const float depth = 16.0f * e->depth * e->depth_scale, inc = e->lfo_inc, pd = e->predelay;
+    const float dep = 16.0f * e->depth, dep1 = dep * e->ds1, dep3 = dep * e->ds3, inc = e->lfo_inc, pd = e->predelay;
     const int n1 = e->n_tap1, n2 = e->n_tap2, nd2 = e->n_d2, nd4 = e->n_d4;
     const float x1 = (float)e->n_tap1x, x2 = (float)e->n_tap2x;
-    const int shim = MODELS[e->model].flags & M_SHIMMER;
+    /* SH: 0 no octave, 1 SHIMMER's, 2 coming or going (sh_g of it) */
+    const float shg = SH == 1 ? 1.0f : e->sh_g;
+    /* XF 1..6: that length is crossfading to its new value (allpass 1, d4, d1, d2, allpass 2, d3) */
+    const int nxd = XF == 1 ? e->nx_tap1 : XF == 2 ? e->nx_d4 : XF == 4 ? e->nx_d2 : e->nx_tap2;
+    const float nxx = XF == 3 ? (float)e->nx_tap1x : (float)e->nx_tap2x, nxdep = dep * e->nx_ds;
+    float g1 = e->xg;
+    const float gs = e->xs;
+    int shw = e->sh_w;
+    float shph = e->sh_ph, shlp = e->sh_lp;
     float l1 = e->lfo1, l2 = e->lfo2, dl = e->damp_l, dr = e->damp_r;
     float ig = e->in_g;
     const float is = e->in_step;
     int pw = e->pre_w;
     for (int i = 0; i < n; i++) {
+        if (XF) g1 += gs;
         ig += is;
         float sg = ig * ig * (3.0f - 2.0f * ig);   /* an S-curve: no corners at either end */
         float x = tank_input(e, 0.5f * sg * (l[i] + r[i]), c1, c2, pd, &pw);
 
         l1 += inc; if (l1 >= 1.0f) l1 -= 1.0f;
         l2 += inc * 1.27f; if (l2 >= 1.0f) l2 -= 1.0f;
+        float m1 = 1.0f + tri(l1), m2 = 1.0f + tri(l2);
 
         /* left loop: fed by the right loop's end */
         float d4o = tapi(e->t_d4, TK_D4, e->ti_d4, nd4);
+        if (XF == 2) d4o += g1 * (tapi(e->t_d4, TK_D4, e->ti_d4, nxd) - d4o);
         float back = d4o;
-        if (shim) back = 0.75f * d4o + 0.5f * shimmer(e, d4o);
-        float a = allpass(x + fb * back, e->t_ap1, n1, &e->ti_ap1, tc);
+        if (SH == 1) back = 0.75f * d4o + 0.5f * shimmer(e->sh_buf, d4o, &shw, &shph, &shlp);
+        else if (SH) back = d4o + shg * (0.5f * shimmer(e->sh_buf, d4o, &shw, &shph, &shlp) - 0.25f * d4o);
+        float a = allpass_t(x + fb * back, e->t_ap1, &e->ti_ap1, n1, tc, XF == 1, nxd, g1);
         e->t_d1[e->ti_d1] = a;
-        float d1o = tap(e->t_d1, TK_D1, e->ti_d1, x1 + depth * (1.0f + tri(l1)));
+        float d1o = tap(e->t_d1, TK_D1, e->ti_d1, x1 + dep1 * m1);
+        if (XF == 3) d1o += g1 * (tap(e->t_d1, TK_D1, e->ti_d1, nxx + nxdep * m1) - d1o);
         e->ti_d1 = e->ti_d1 + 1 < TK_D1 ? e->ti_d1 + 1 : 0;
         dl += dc * (d1o - dl);
         e->t_d2[e->ti_d2] = dl;
         float d2o = tapi(e->t_d2, TK_D2, e->ti_d2, nd2);
+        if (XF == 4) d2o += g1 * (tapi(e->t_d2, TK_D2, e->ti_d2, nxd) - d2o);
         e->ti_d2 = e->ti_d2 + 1 < TK_D2 ? e->ti_d2 + 1 : 0;
 
         /* right loop: fed by the left loop's end */
-        float b = allpass(x + fb * d2o, e->t_ap2, n2, &e->ti_ap2, tc);
+        float b = allpass_t(x + fb * d2o, e->t_ap2, &e->ti_ap2, n2, tc, XF == 5, nxd, g1);
         e->t_d3[e->ti_d3] = b;
-        float d3o = tap(e->t_d3, TK_D3, e->ti_d3, x2 + depth * (1.0f + tri(l2)));
+        float d3o = tap(e->t_d3, TK_D3, e->ti_d3, x2 + dep3 * m2);
+        if (XF == 6) d3o += g1 * (tap(e->t_d3, TK_D3, e->ti_d3, nxx + nxdep * m2) - d3o);
         e->ti_d3 = e->ti_d3 + 1 < TK_D3 ? e->ti_d3 + 1 : 0;
         dr += dc * (d3o - dr);
         e->t_d4[e->ti_d4] = dr;
@@ -334,6 +467,33 @@ STAGE static void reverb_tank(fx_engine *e, const float *l, const float *r, floa
         wr[i] = 0.6f * (d3o - 0.6f * d1o + 0.4f * d2o);
     }
     e->lfo1 = l1; e->lfo2 = l2; e->damp_l = dl; e->damp_r = dr; e->pre_w = pw; e->in_g = ig;
+    if (XF) e->xg = g1;
+    if (SH) { e->sh_w = shw; e->sh_ph = shph; e->sh_lp = shlp; }
+}
+
+static __attribute__((noinline)) void tank_switching(fx_engine *e, const float *l, const float *r, float *wl, float *wr, int n)
+{
+    if (!e->xf_stage && (e->sh_g != 0.0f || e->sh_prime)) {
+        /* the octave only changes while no length is moving */
+        tank_run(e, l, r, wl, wr, n, 0, 2);
+    } else {
+        switch (e->xf_stage) {
+        case 1: tank_run(e, l, r, wl, wr, n, 1, 0); break;
+        case 2: tank_run(e, l, r, wl, wr, n, 2, 0); break;
+        case 3: tank_run(e, l, r, wl, wr, n, 3, 0); break;
+        case 4: tank_run(e, l, r, wl, wr, n, 4, 0); break;
+        case 5: tank_run(e, l, r, wl, wr, n, 5, 0); break;
+        default: tank_run(e, l, r, wl, wr, n, 6, 0); break;
+        }
+    }
+}
+
+STAGE static void reverb_tank(fx_engine *e, const float *l, const float *r, float *wl, float *wr, int n)
+{
+    /* a switch under way, or the octave coming or going */
+    if (e->xf_stage || e->sh_prime || (e->sh_g != 0.0f && e->sh_g != 1.0f)) tank_switching(e, l, r, wl, wr, n);
+    else if (e->sh_g != 0.0f) tank_run(e, l, r, wl, wr, n, 0, 1);
+    else tank_run(e, l, r, wl, wr, n, 0, 0);
 }
 
 /* SPRING: two springs at 12 kHz, each a feedback delay with the dispersion in its loop. The

@@ -197,7 +197,7 @@ static void start(int model)
         static float zl[4096], zr[4096];
         fx_set_model(&E, model);
         memset(zl, 0, sizeof zl); memset(zr, 0, sizeof zr);
-        fx_process(&E, zl, zr, 4096);
+        for (int k = 0; k < 4; k++) fx_process(&E, zl, zr, 4096);   /* a carried switch takes ~170 ms */
     }
 }
 
@@ -452,18 +452,27 @@ int main(int argc, char **argv)
         check(after - second < -40, "REVERSE: cut off after the swell (dB)", after - second);
         wav_write(dir, "reverse_hit.wav", hl, hr, n);
     }
-    {   /* SHIMMER: the octave up builds in the tail; HALL has far less of it */
+    {   /* SHIMMER: the octave up builds in the tail; HALL has far less of it. How much depends on
+         * where the pitch shifter's window is when the tone comes (from -8 to -18 dB), so this
+         * is the average over eight starting points across the window. */
         double oct[2]; const int ms[2] = { FX_SHIMMER, FX_HALL };
         for (int k = 0; k < 2; k++) {
             int n = 4 * SR;
-            start(ms[k]); faders(1.0f, 0.6f, 0.7f, 0.5f); fx_set_param2(&E, FX_MOD_DEPTH, 0.0f);
-            memset(hl, 0, 4 * n); memset(hr, 0, 4 * n);
-            for (int i = 0; i < SR / 2; i++) hl[i] = hr[i] = 0.3f * (float)sin(2 * M_PI * 440.0 * i / SR);
-            fx_process(&E, hl, hr, n);
-            oct[k] = tone_db(hl, SR, 3 * SR, 880.0) - tone_db(hl, SR, 3 * SR, 440.0);
-            if (!k) wav_write(dir, "shimmer_tone.wav", hl, hr, n);
+            double p8 = 0, p4 = 0;
+            for (int j = 0; j < 8; j++) {
+                start(ms[k]); faders(1.0f, 0.6f, 0.7f, 0.5f); fx_set_param2(&E, FX_MOD_DEPTH, 0.0f);
+                memset(hl, 0, 4 * n); memset(hr, 0, 4 * n);
+                fx_process(&E, hl, hr, 1 + 256 * j);   /* silence: the window moves on */
+                memset(hl, 0, 4 * n); memset(hr, 0, 4 * n);
+                for (int i = 0; i < SR / 2; i++) hl[i] = hr[i] = 0.3f * (float)sin(2 * M_PI * 440.0 * i / SR);
+                fx_process(&E, hl, hr, n);
+                p8 += pow(10, tone_db(hl, SR, 3 * SR, 880.0) / 10);
+                p4 += pow(10, tone_db(hl, SR, 3 * SR, 440.0) / 10);
+                if (!k && !j) wav_write(dir, "shimmer_tone.wav", hl, hr, n);
+            }
+            oct[k] = 10 * log10(p8 / p4);
         }
-        check(oct[0] > -10, "SHIMMER: the octave (880 Hz) in the tail vs 440 Hz (dB)", oct[0]);
+        check(oct[0] > -14, "SHIMMER: the octave (880 Hz) in the tail vs 440 Hz (dB)", oct[0]);
         check(oct[0] - oct[1] > 15, "SHIMMER: far more octave than HALL (dB)", oct[0] - oct[1]);
     }
     {   /* SPRING: dispersion: in the first trip the lows arrive well after the highs (the drip) */
@@ -504,6 +513,41 @@ int main(int argc, char **argv)
         double c = fmax(click_ratio(l, N), click_ratio(r, N));
         check(c < 15, "models: switching every 0.5 s while playing: no clicks", c);
         wav_write(dir, "model_switching.wav", l, r, N);
+    }
+    {   /* switching between the tank models keeps the tail: a burst, then the switch while it rings */
+        static const int pairs[][2] = { { FX_HALL, FX_PLATE }, { FX_PLATE, FX_ROOM }, { FX_ROOM, FX_HALL },
+                                        { FX_HALL, FX_CLOUD }, { FX_CLOUD, FX_SHIMMER }, { FX_SHIMMER, FX_HALL } };
+        double worst = 0, wc = 0;
+        for (int p = 0; p < 6; p++) {
+            const int n = 2 * SR, sw = SR;
+            start(pairs[p][0]); faders(1.0f, 0.6f, 0.7f, 0.5f); fx_set_param2(&E, FX_PREDELAY, 0.0f);
+            memset(hl, 0, 4 * n); memset(hr, 0, 4 * n);
+            unsigned s = 3;
+            for (int i = 0; i < SR / 4; i++) hl[i] = hr[i] = (float)(0.3 * nz(&s));
+            for (int i = 0; i < n; i += 128) {
+                if (i == sw) fx_set_model(&E, pairs[p][1]);
+                fx_process(&E, hl + i, hr + i, 128);
+            }
+            /* the 100 ms before the switch against 100 ms once it is across (it takes ~130 ms). The
+             * tail decays meanwhile (ROOM's by ~10 dB); cut off, as it was, it would be silence */
+            double drop = rms_db(hl, sw - SR / 10, sw) - rms_db(hl, sw + SR * 3 / 20, sw + SR / 4);
+            if (drop > worst) worst = drop;
+            double c = fmax(click_ratio(hl, n), click_ratio(hr, n));
+            if (c > wc) wc = c;
+            if (p == 0) wav_write(dir, "model_carry.wav", hl, hr, n);
+        }
+        check(worst < 20, "models: a switch between tank models keeps the tail (worst drop, dB)", worst);
+        check(wc < 3, "models: and it does not click (a steady tail: ~1.7)", wc);
+    }
+    {   /* SHIMMER at full DECAY dies away: its octave once fed the lows back until they ran away */
+        const int n = 12 * SR;
+        start(FX_SHIMMER); faders(1.0f, 1.0f, 0.7f, 0.5f); fx_set_param2(&E, FX_MOD_DEPTH, 1.0f);
+        memset(hl, 0, 4 * n); memset(hr, 0, 4 * n);
+        unsigned s = 5;
+        for (int i = 0; i < 2 * SR; i++) hl[i] = hr[i] = (float)(0.8 * nz(&s));
+        for (int i = 0; i < n; i += 256) fx_process(&E, hl + i, hr + i, 256);
+        double d = rms_db(hl, 10 * SR, 11 * SR) - rms_db(hl, 3 * SR, 4 * SR);
+        check(d < -40, "SHIMMER: DECAY at the top, the tail still dies away (dB, 7 s on)", d);
     }
     {   /* filter: shapes the reverb only */
         double lo0, hi0;

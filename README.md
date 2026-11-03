@@ -13,8 +13,10 @@ the space with the four faders, and hear it on headphones or the speaker.
 ## The models
 
 Pick a model with the TRACK buttons: TRACK n picks model n, and pressing the same button again
-flips to model n + 4 (and back). Switching fades the reverb out and back in over about 40 ms; the
-dry signal never moves.
+flips to model n + 4 (and back). Switching between Hall, Plate, Room, Cloud and Shimmer keeps the
+tail: what is already ringing carries on into the new model, which takes over in about 130 ms
+(Shimmer's octave fades out first, or in after). Switching to or from Spring, Gated or Reverse
+fades the reverb out and back in over about 40 ms instead. The dry signal never moves.
 
 | Button | Model | What it is | DECAY sets |
 |---|---|---|---|
@@ -30,8 +32,9 @@ dry signal never moves.
 Each model is tested on its own (`make test`): decay time against the setting, stereo width,
 level against the dry, no clicks while every control sweeps, silence in giving silence out, and
 the same output for any block size. On top of that: the gate closes, the reverse swell rises, the
-shimmer carries the octave, the springs drip (in each trip the lows arrive ~12 ms after the highs), crash on a hard hit but not a soft one, and their tails are smooth, not a train of echoes, and switching models
-while playing doesn't click.
+shimmer carries the octave, the springs drip (in each trip the lows arrive ~12 ms after the highs), crash on a hard hit but not a soft one, and their tails are smooth, not a train of echoes, Shimmer
+dies away even with DECAY at the top, switching models while playing doesn't click, and a switch
+between the tank models keeps the tail without a click.
 
 ## The faders
 
@@ -93,8 +96,9 @@ readings, `usb=` streaming, `fill=` the input buffer, `under= over=` buffer unde
 
 - RAM: about 162 KB of 256 KB, mostly the reverb's delay lines.
 - CPU, worst case (any model, with the filter, grit and modulation all on): about 60% of the
-  64 MHz Cortex-M4, estimated by `tools/bench_m4.py` (`BENCH_MODEL=0..7` picks the model). The
-  real figure is the status line's `blk=`.
+  64 MHz Cortex-M4, estimated by `tools/bench_m4.py` (`BENCH_MODEL=0..7` picks the model;
+  `BENCH_SWITCH=n` measures a switch to model n, which costs no more). The real figure is the
+  status line's `blk=`.
 
 ## Building
 

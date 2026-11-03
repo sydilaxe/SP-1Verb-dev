@@ -80,6 +80,14 @@ jobs:
             echo "model $m worst case: $pct% of one core"
             test -n "$pct" && test "$pct" -le 80
           done
+          # and a switch that keeps the tail, while its lengths crossfade (or SHIMMER's octave fades)
+          for sw in "0 1" "2 0" "4 5" "5 4"; do
+            set -- $sw
+            BENCH_MODEL=$1 BENCH_SWITCH=$2 ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk-0.17.4 python3 sp-1verb/tools/bench_m4.py | tee bench.txt
+            pct=$(sed -n 's/.*: \([0-9]*\)% of one core.*/\1/p' bench.txt)
+            echo "switch $1 to $2: $pct% of one core"
+            test -n "$pct" && test "$pct" -le 80
+          done
 
       - uses: actions/upload-artifact@v4
         with:
@@ -113,6 +121,9 @@ jobs:
           grep -q "^SPRING: 400 Hz arrives after 3 kHz in a trip, the drip .* ok" $r
           grep -q "^SPRING: a hard hit crashes.* ok" $r
           grep -q "^models: switching every 0.5 s while playing: no clicks .* ok" $r
+          grep -q "^models: a switch between tank models keeps the tail .* ok" $r
+          grep -q "^models: and it does not click .* ok" $r
+          grep -q "^SHIMMER: DECAY at the top, the tail still dies away .* ok" $r
           grep -q "^filter: flat anywhere in the middle fifth .* ok" $r
 
       - uses: actions/upload-artifact@v4

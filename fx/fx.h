@@ -11,7 +11,10 @@
  *   SHIMMER  an octave up in the tank's feedback: each echo climbs
  *   GATED    the 80s non-linear drum reverb: dense, then cut off (DECAY sets the gate time)
  *   REVERSE  swells up after each hit, then cuts off (DECAY sets the swell length)
- * Switching models fades the reverb out and in (about 20 ms each way); the dry never moves.
+ * Switching between HALL, PLATE, ROOM, CLOUD and SHIMMER keeps the tail: the sound already in the
+ * tank rings on in the new model, its delays crossfading to the new lengths one at a time (about
+ * 85 ms in all; SHIMMER's octave fades out first, or in after). Into or out of SPRING, GATED or
+ * REVERSE the reverb fades out and in (about 20 ms each way) instead. The dry never moves.
  *
  * Page 1 (the faders as they come up):
  *   fader 1  MIX        dry (bottom) to all reverb (top), constant power
@@ -53,10 +56,11 @@ enum { FX_HALL, FX_PLATE, FX_ROOM, FX_SPRING, FX_CLOUD, FX_SHIMMER, FX_GATED, FX
 #define AP_IN2 587
 #define AP_IN3 409
 #define AP_IN4 307
-#define TK_AP1 1753
+#define TK_AP1 1753                          /* the tank allpasses' longest; their buffers are */
 #define TK_D1  4241                           /* read at about 3900 + modulation */
 #define TK_D2  3571
 #define TK_AP2 1811
+#define TK_APM 2048                           /* a power of 2, so a switch can read two lengths */
 #define TK_D3  4691                           /* read at about 4360 + modulation */
 #define TK_D4  3989
 #define SH_LEN 2048    /* shimmer pitch shifter window */
@@ -84,6 +88,14 @@ typedef struct {
     float in_g, in_t, in_step;       /* the reverb's input, faded in after a switch */
     int n_ap[4], n_tap1, n_tap2, n_d2, n_d4, n_tap1x, n_tap2x;
     float size, tank_c, depth_scale;
+    /* a switch that keeps the tail: each of the tank's six lengths (two allpasses, four delays)
+     * crossfades in turn to its new value (nx_*), xg its weight, xs its step per frame; xp the
+     * whole switch's progress, as the loop's gain and coefficients glide from the old model's (o_*) */
+    int xf_stage, xf_n, xf_on;
+    int nx_tap1, nx_tap2, nx_d2, nx_d4, nx_tap1x, nx_tap2x;
+    float nx_ds, ds1, ds3;
+    float o_tank_c, o_diff_scale, o_fb, o_damp_c, o_trim;
+    float xg, xs, xp;
 
     /* GATED / REVERSE: an envelope on the reverb, keyed by the input */
     float k_det, k_slow, k_env, k_att, k_rel, k_rel_s, k_close;
@@ -93,6 +105,9 @@ typedef struct {
     float sh_buf[SH_LEN];
     int sh_w;
     float sh_ph;
+    float sh_lp;                     /* its high-pass */
+    float sh_g;                      /* how much octave: it fades on a carried switch */
+    int sh_prime;                    /* chunks left filling its window before it fades in */
 
     /* SPRING */
     float sp_d[2][SPR_N];           /* the dispersion's state */
@@ -114,8 +129,8 @@ typedef struct {
     int ap_i[4];
 
     /* the tank: two cross-coupled loops */
-    float t_ap1[TK_AP1], t_d1[TK_D1], t_d2[TK_D2];
-    float t_ap2[TK_AP2], t_d3[TK_D3], t_d4[TK_D4];
+    float t_ap1[TK_APM], t_d1[TK_D1], t_d2[TK_D2];
+    float t_ap2[TK_APM], t_d3[TK_D3], t_d4[TK_D4];
     int ti_ap1, ti_d1, ti_d2, ti_ap2, ti_d3, ti_d4;
     float damp_l, damp_r;
 
