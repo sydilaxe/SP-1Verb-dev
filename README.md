@@ -30,7 +30,7 @@ dry signal never moves.
 Each model is tested on its own (`make test`): decay time against the setting, stereo width,
 level against the dry, no clicks while every control sweeps, silence in giving silence out, and
 the same output for any block size. On top of that: the gate closes, the reverse swell rises, the
-shimmer carries the octave, the springs drip (in each trip the lows arrive ~15 ms after the highs), crash on a hard hit but not a soft one, and their tails are smooth, not a train of echoes, and switching models
+shimmer carries the octave, the springs drip (in each trip the lows arrive ~12 ms after the highs), crash on a hard hit but not a soft one, and their tails are smooth, not a train of echoes, and switching models
 while playing doesn't click.
 
 ## The faders

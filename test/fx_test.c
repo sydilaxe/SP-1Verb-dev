@@ -468,7 +468,7 @@ int main(int argc, char **argv)
     }
     {   /* SPRING: dispersion: in the first trip the lows arrive well after the highs (the drip) */
         impulse(FX_SPRING, 0.0f, 0.7f, hl, hr, SR);
-        int a = 200 + 3 * 347, b = a + 3 * 500;   /* the first trip */
+        int a = 200 + 4 * 263, b = a + 4 * 330;   /* the first trip */
         double lo = band_peak_at(hl, a, b, 400), hi = band_peak_at(hl, a, b, 3000);
         check(lo - hi > 480, "SPRING: 400 Hz arrives after 3 kHz in a trip, the drip (frames)", lo - hi);
     }
