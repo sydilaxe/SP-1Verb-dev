@@ -4,7 +4,7 @@
  *   HALL     a large modulated tank: lush and long
  *   PLATE    dense and bright, builds fast
  *   ROOM     small and short
- *   SPRING   two dispersive springs: the chirp and drip of a spring tank
+ *   SPRING   two dispersive springs: the chirp and drip of a spring tank (DIFFUSION: its smear)
  *   CLOUD    huge, sparse, heavily modulated: a scattered ambient wash
  *   SHIMMER  an octave up in the tank's feedback: each echo climbs
  *   GATED    the 80s non-linear drum reverb: dense, then cut off (DECAY sets the gate time)
@@ -59,6 +59,7 @@ enum { FX_HALL, FX_PLATE, FX_ROOM, FX_SPRING, FX_CLOUD, FX_SHIMMER, FX_GATED, FX
 #define TK_D4  3989
 #define SH_LEN 2048    /* shimmer pitch shifter window */
 #define SPR_N  12      /* allpasses in each spring's dispersion */
+#define SPR_K  6       /* each stretched to 6 frames: the chirps sit below 4 kHz, as in a tank */
 
 #define LIM_LA 48      /* safety look-ahead: 1 ms, and its latency */
 #define LIM_SEG 8
@@ -93,7 +94,8 @@ typedef struct {
     float sh_ph;
 
     /* SPRING */
-    float sp_x[2][SPR_N], sp_y[2][SPR_N];
+    float sp_d[2][SPR_K][SPR_N];   /* the dispersion's state, frame by frame */
+    int sp_i;
 
     /* pre-delay and input diffusers */
     float pre[PRE_MAX];
