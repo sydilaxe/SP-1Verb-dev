@@ -1,96 +1,128 @@
-# SP-1 Reverb: Dedicated Early Digital Reverb for Teenage Engineering SP-1
+# SP-1 Reverb
 
-Firmware and Web Audio companion that turns the **Teenage Engineering SP-1** into a dedicated early digital reverb processor. Play audio into it over USB-C (it shows up as a class-compliant sound card, `"SP-1 Reverb"`, on macOS, iOS, Windows, Android, or Linux), sculpt the reverb space with the four touch faders, and hear it on headphones or the built-in speaker.
+Firmware that turns the Teenage Engineering SP-1 into a reverb with eight models. Play audio into
+it over USB-C (it shows up as a sound card, "SP-1 Reverb", on a computer, phone or tablet), shape
+the space with the four faders, and hear it on headphones or the speaker.
 
-**Firmware Binary:** [`sp1verb.bin`](sp1verb.bin) (flashable via [solderless.engineering](https://solderless.engineering))
+**Firmware:** [`sp1verb.bin`](sp1verb.bin) (flash with [solderless.engineering](https://solderless.engineering))
 
----
+> **Not yet run on a real SP-1.** It builds, the engine passes its tests, and the platform code
+> is the same as SP-1FX's, which follows firmware that does run on the SP-1 (see Credits), but
+> this exact binary has not been on hardware.
 
-## 🎛️ The Controls
+## The models
 
-### Core Controls (Bank 1 — Default)
-| Fader | Parameter | Down | Up |
+Pick a model with the TRACK buttons: TRACK n picks model n, and pressing the same button again
+flips to model n + 4 (and back). Switching fades the reverb out and back in over about 40 ms; the
+dry signal never moves.
+
+| Button | Model | What it is | DECAY sets |
 |---|---|---|---|
-| 1 | **Mix** | Dry (0%) | 100% Wet Reverb |
-| 2 | **Decay** | 0.2 s tight room | 20.0 s+ / infinite early digital wash |
-| 3 | **Diffusion** | Granular scatter echoes | Dense reflection cloud |
-| 4 | **Filter** | 2-pole Low-Pass sweeping down | 2-pole High-Pass sweeping up (centre fifth is neutral flat) |
+| TRACK 1 | **Hall** | a large modulated tank: lush and long | 0.6 to 30 s |
+| TRACK 2 | **Plate** | dense and bright, builds fast | 0.4 to 10 s |
+| TRACK 3 | **Room** | small and short | 0.2 to 3 s |
+| TRACK 4 | **Spring** | two dispersive springs: the chirp and drip of a spring tank | 0.4 to 6 s |
+| TRACK 1, again | **Cloud** | huge, sparse and heavily modulated: a scattered ambient wash | 2 to 60 s |
+| TRACK 2, again | **Shimmer** | an octave up in the tank's feedback, so each echo climbs | 1 to 30 s |
+| TRACK 3, again | **Gated** | the 80s drum reverb: dense while the hit lasts, then cut off | gate time, 60 to 600 ms |
+| TRACK 4, again | **Reverse** | swells up after each hit, then cuts off | swell length, 0.15 to 1 s |
 
-### Modulation Bank (Bank 2 — Engaged by PLAY button)
-Pressing the central silicone **PLAY** button toggles Bank 2 for real-time tone character shaping:
-| Fader | Parameter | Function |
+Each model is tested on its own (`make test`): decay time against the setting, stereo width,
+level against the dry, no clicks while every control sweeps, silence in giving silence out, and
+the same output for any block size. On top of that: the gate closes, the reverse swell rises, the
+shimmer carries the octave, the springs disperse (lows arrive after highs), and switching models
+while playing doesn't click.
+
+## The faders
+
+Two pages of four. **FWD (>>)** goes to page 2, **RWD (<<)** back to page 1. After a page change
+a parameter keeps its value until its fader reaches it (or sweeps past it), so nothing jumps; its
+track light blinks until then.
+
+| Fader | Page 1 | Page 2 |
 |---|---|---|
-| 1 | **Mod Depth** | Recirculating delay line chorusing & pitch flutter (0..8 samples) |
-| 2 | **Mod Rate** | LFO spin rate (0.2 Hz to 4.5 Hz) |
-| 3 | **Pre-Delay** | 0 to 150 ms early reflection onset gap to keep dry transients punchy |
-| 4 | **Vintage Grit** | 12-bit / 8-bit DAC decimation and non-linear warmth |
+| 1 | **Mix**: dry at the bottom, all reverb at the top (constant power) | **Mod depth**: chorusing of the tank |
+| 2 | **Decay**: the model's reverb time (see above); the tail darkens as it lengthens | **Mod rate**: 0.2 to 4.5 Hz |
+| 3 | **Diffusion**: scattered echoes at the bottom, a dense cloud at the top | **Pre-delay**: 0 to 150 ms before the reverb starts |
+| 4 | **Filter**: the reverb's tone. The middle fifth is flat; down sweeps a low-pass down to 200 Hz, up a high-pass up to 4 kHz. The dry is never filtered | **Grit**: an early-digital converter, down to 6 bits on the reverb. The bit steps follow the reverb's level, so quiet tails get gritty too instead of cutting off |
 
-### Hardware Buttons & Rocker Switch
-| Control | Function |
+After the mix, a **safety ceiling** at -1 dBFS (1 ms look-ahead) is always on and only acts on
+overs.
+
+**Full bandwidth, 24-bit:** USB audio is 48 kHz / 24-bit in and out, and the reverb runs at
+48 kHz in 32-bit floating point. With Mix at the bottom the output is the input, bit for bit,
+48 samples (1 ms) later.
+
+## Other controls
+
+| | |
 |---|---|
-| **Rocker Switch (`◀` / `▶`)** | Steps backward/forward through 8 historic early digital reverb algorithms |
-| **PLAY** | Toggle between Bank 1 (Mix/Decay/Diffusion/Filter) and Bank 2 (Mod Depth/Rate/Pre-delay/Grit) |
-| **TRACK 1–4** | Mute or bypass individual fader channels |
-| **VOL + / VOL -** | Output volume in 3 dB steps (-60 dB to 0 dB) |
-| **FUNCTION (hold 1.5 s)** | Power ON |
-| **FUNCTION (hold 2.5 s)** | Power OFF |
-| **TRACK 1 + 4 (hold 3 s)** | Restart into the SP-1 bootloader for firmware flashing |
+| PLAY | bypass: the reverb glides out and back (the safety ceiling stays) |
+| VOL + / VOL - | output volume, 3 dB steps |
+| FUNCTION, hold 1.5 s | power on |
+| FUNCTION, hold 2.5 s | power off |
+| TRACK 1 + TRACK 4, hold 3 s | restart into the bootloader, for flashing |
 
-### Screenless LED Light Ladders
-- **Track Lights (Faders 1–4):** Reflect the active value of each fader. When a preset is changed via the Rocker switch, the lights flash the algorithm number for 1.2s.
-- **Status Lights:** Indicate volume changes and breathe slowly while in Bank 2 (Modulation mode).
+Lights: the track lights show the faders of the page you're on (Filter: its distance from the
+centre). For 1.2 s after a model change they show the model: its button's light, steady for
+models 1-4 and blinking for 5-8. For 0.6 s after FWD or RWD the status lights show the page
+(left pair = page 1, right pair = page 2). Otherwise they show the safety ceiling's gain
+reduction (the fourth blinking while on page 2), the volume for a second after you change it,
+and breathe slowly in bypass. Plug in headphones and the speaker turns off.
 
----
+## Flashing and getting back
 
-## 🏛️ Comparison with SP-1FX Architecture
+1. Connect the SP-1 with a USB-C cable to Chrome or Edge.
+2. Put it in firmware-loading mode: **hold TRACK 1 + TRACK 4 while you plug in USB** (the
+   bootloader's own check, so it works whatever firmware is on it), or, with this firmware
+   running, hold them for 3 seconds. The four track lights come on.
+3. Open [solderless.engineering](https://solderless.engineering), choose `sp1verb.bin`, flash,
+   unplug, plug back in.
 
-| Feature | SP-1FX Reference | SP-1 Reverb (`SP-1Verb-dev`) |
-|---|---|---|
-| **Application** | 4 multi-effects (Dub tape, Filter, Bitcrush, Limiter) | Dedicated Schroeder-Dattorro Early Digital Reverb unit |
-| **Sample Rate Pipeline** | 48 kHz in/out with 24 kHz core processing | 48 kHz in/out with 24 kHz core processing |
-| **Half-Band Decimation** | 10-coeff polyphase IIR (-72 dB @ 13k, <-140 dB @ 14k) | Identical 10-coeff polyphase IIR downsampler and upsampler |
-| **RAM Footprint** | ~91 KB of 256 KB | ~87 KB of 256 KB (>140 KB SRAM headroom) |
-| **CPU Load** | ~70% peak on 64 MHz Cortex-M4 | ~28–35% on 64 MHz Cortex-M4 (well clear of the 80% ceiling) |
-| **Memory Allocations** | Zero heap (`malloc`), all static structs | Zero heap, zero `malloc`, all static structs |
-| **Math Dependencies** | Pure float, no `libm`, single-cycle `VSQRT.F32` | Pure float, no `libm`, single-cycle `VSQRT.F32` |
-| **Bootloader Target** | 0x20000 offset, <= 0xDF000, initial SP in RAM | Exact SP-1 bootloader compliance (passes automated vector verification) |
+The SP-1 has no reset button: if anything ever hangs, the watchdog restarts it within 4 seconds;
+if it won't start at all, step 2's plug-in hold still reaches the bootloader.
 
----
+## Status line
 
-## ⚡ Building & Testing
+Open the SP-1's USB serial port (any baud rate) for a line a second: `model=`, `f=` fader
+readings, `usb=` streaming, `fill=` the input buffer, `under= over=` buffer under/overruns,
+`blk=last/max us` the time one 2.67 ms audio block takes (the CPU check: it must stay well under
+2667), `hp=` headphones, `gr=` the ceiling's reduction, `flt=` a crash from the last boot.
+
+## CPU and memory
+
+- RAM: about 162 KB of 256 KB, mostly the reverb's delay lines.
+- CPU, worst case (any model, with the filter, grit and modulation all on): about 60% of the
+  64 MHz Cortex-M4, estimated by `tools/bench_m4.py` (`BENCH_MODEL=0..7` picks the model). The
+  real figure is the status line's `blk=`.
+
+## Building
 
 ```bash
-# 1. Run host DSP test suite and render check WAVs
-make test
-
-# 2. Estimate Cortex-M4 CPU cycles using unicorn emulator
-make bench
-
-# 3. Build flashable Zephyr firmware binary (requires Zephyr SDK 0.17.4)
-make firmware
+make test        # the engine on your computer: checks for every model, and WAVs in build/test
+make firmware    # sp1verb.bin; needs ZEPHYR_BASE (Zephyr v4.3.1) and the Zephyr SDK 0.17.4
+make bench       # the Cortex-M4 cycle estimate (pip install unicorn capstone)
 ```
 
-### Automated GitHub Actions CI
-Every commit and push automatically triggers `.github/workflows/build.yml` which:
-1. Provisions Zephyr v4.3.1 and Zephyr SDK 0.17.4.
-2. Compiles `sp1verb.bin` via `scripts/build-firmware.sh`.
-3. Verifies bootloader address offsets (0x20000) and vector table compliance.
-4. Executes the host DSP test suite (`make test`).
-5. Checks Cortex-M4 instruction cycle counts (`tools/bench_m4.py`).
-6. Attaches `sp1verb.bin` as a downloadable GitHub Release artifact.
+`.github/workflows/build.yml` builds the firmware, checks it loads where the bootloader puts it,
+runs the tests, checks every model's CPU estimate stays under 80%, and keeps `sp1verb.bin` and
+the WAVs as artifacts.
 
----
+| Path | |
+|---|---|
+| `fx/` | the reverb engine: plain C, float, no libm, no heap; runs the same on the host and the SP-1 |
+| `test/` | host checks for the engine and each model, and renders |
+| `firmware/` | Zephyr application: USB audio (UAC2), I2S, codecs, faders, buttons, lights, power |
+| `boards/` | the SP-1 board definition |
+| `tools/bench_m4.py` | the CPU estimate |
+| `src/`, `index.html` | a browser preview of the controls (separate from the firmware; its presets are not the firmware's models) |
 
-## 🚀 Flashing via Solderless.engineering
+## Credits
 
-1. Connect the SP-1 with a **USB-C** cable to Google Chrome or Microsoft Edge.
-2. Enter firmware-loading mode: **Hold TRACK 1 + TRACK 4 while plugging in USB** (or hold them for 3 seconds while powered on). All 4 track lights will come on solid.
-3. Open **[solderless.engineering](https://solderless.engineering)**.
-4. Select `sp1verb.bin`, flash, unplug, and reconnect.
-
----
-
-## 📄 Credits & Sources
-- **[timknapen/SP-1-dev](https://github.com/timknapen/SP-1-dev)**: Pinouts, hardware peripherals, and bootloader specifications.
-- **[chattock/sp1-tape-looper](https://github.com/chattock/sp1-tape-looper)** (MIT): SP-1 board DTS definition, CS42L42 and TAS2505 audio codec initialization, and USB UAC2 class feedback backport.
-- **Laurent de Soras**: Polyphase IIR half-band filter design.
+- [chattock/sp1-tape-looper](https://github.com/chattock/sp1-tape-looper) (MIT): the SP-1 board
+  definition, the USB audio class backport, and the platform code: codec setup, I2S clocking, USB
+  feedback, buttons, power and the bootloader rules. Its licence is in
+  `firmware/LICENSE-sp1-tape-looper`.
+- [timknapen/SP-1-dev](https://github.com/timknapen/SP-1-dev): the SP-1's pinout, peripherals and
+  bootloader documentation.
+- The tank follows Jon Dattorro's "Effect Design, Part 1" (JAES, 1997).

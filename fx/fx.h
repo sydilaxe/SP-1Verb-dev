@@ -1,31 +1,37 @@
-/* SP-1 Reverb Engine: Dedicated Early Digital Reverb for Teenage Engineering SP-1.
+/* SP-1 Reverb engine: an early-digital style plate/hall reverb for the Teenage Engineering SP-1.
  *
- * Controls (Bank 1):
- *   Fader 1 (0): MIX        Reverb dry/wet mix (0.0 = 100% dry, 1.0 = 100% wet)
- *   Fader 2 (1): DECAY      Decay time (0.2s to 20s+ / infinite wash)
- *   Fader 3 (2): DIFFUSION  Early reflection diffusion & tank density
- *   Fader 4 (3): FILTER     Bi-directional HP/LP: centre fifth (0.4-0.6) flat,
- *                           down sweeps 2-pole low-pass down,
- *                           up sweeps 2-pole high-pass up.
+ * Eight models (TRACK buttons in the firmware), each its own structure:
+ *   HALL     a large modulated tank: lush and long
+ *   PLATE    dense and bright, builds fast
+ *   ROOM     small and short
+ *   SPRING   two dispersive springs: the chirp and drip of a spring tank
+ *   CLOUD    huge, sparse, heavily modulated: a scattered ambient wash
+ *   SHIMMER  an octave up in the tank's feedback: each echo climbs
+ *   GATED    the 80s non-linear drum reverb: dense, then cut off (DECAY sets the gate time)
+ *   REVERSE  swells up after each hit, then cuts off (DECAY sets the swell length)
+ * Switching models fades the reverb out and in (about 20 ms each way); the dry never moves.
  *
- * Controls (Bank 2 - toggled via PLAY button):
- *   Fader 1 (0): MOD DEPTH  Chorus/pitch flutter in delay tanks (0..1)
- *   Fader 2 (1): MOD RATE   Modulation LFO speed (0.1 Hz to 5.0 Hz)
- *   Fader 3 (2): PRE-DELAY  0 ms to 150 ms pre-delay
- *   Fader 4 (3): GRIT       Early digital 12-bit/8-bit DAC decimation & transformer warmth
+ * Page 1 (the faders as they come up):
+ *   fader 1  MIX        dry (bottom) to all reverb (top), constant power
+ *   fader 2  DECAY      the reverb time (its range depends on the model); darker as it lengthens
+ *   fader 3  DIFFUSION  scattered echoes (bottom) to a dense cloud (top)
+ *   fader 4  FILTER     the reverb's tone: the middle fifth is flat; down sweeps a low-pass down,
+ *                       up sweeps a high-pass up. The dry signal is never filtered.
+ * Page 2 (FWD in the firmware):
+ *   fader 1  MOD DEPTH  chorusing of the tank's delay lines
+ *   fader 2  MOD RATE   0.2 to 4.5 Hz
+ *   fader 3  PRE-DELAY  0 to 150 ms before the reverb starts
+ *   fader 4  GRIT       early-digital converter: fewer bits (down to 6) on the reverb, following
+ *                       its level so quiet tails are gritty too rather than cut off
  *
- * Audio path:
- *   In and out at 48 kHz stereo (USB Audio Class 2 + CS42L42 / TAS2505 codecs).
- *   Input warm stage -> polyphase IIR half-band decimation to 24 kHz (cuts CPU in half,
- *   doubles maximum reverb delay time, authentic early digital bandwidth).
- *   Stereo Schroeder-Dattorro early digital tank with 4 input allpass diffusers,
- *   dual cross-coupled modulated delay loops, 1-pole damping filters, SVF tone shaping.
- *   Polyphase IIR half-band interpolation back to 48 kHz.
- *   Transparent mastering ceiling at -0.3 dBFS.
+ * After the mix, an always-on safety ceiling (-1 dBFS, 1 ms look-ahead) that only acts on overs.
  *
- * Float, stereo, any block size, zero heap allocations, no libm dependencies.
- */
-
+ * Full bandwidth: everything runs at 48 kHz in 32-bit float. With MIX at the bottom the output is
+ * the input, bit for bit, fx_latency() frames later.
+ *
+ * Float, stereo, any block size: parameters move every FX_CHUNK frames counted from the start, so
+ * the output does not depend on how the audio is cut into blocks. No libm, no heap: an fx_engine
+ * is about 130 KB, mostly delay lines, and should be a static. */
 #ifndef SP1_REVERB_FX_H
 #define SP1_REVERB_FX_H
 
@@ -33,130 +39,101 @@
 #include "fx_math.h"
 
 #define FX_SLOTS 4
-#define FX_CHUNK 16   /* Core frames (24 kHz) between parameter ramps */
+#define FX_CHUNK 32   /* frames (48 kHz) between parameter updates: 0.67 ms */
 
-enum {
-    FX_MIX = 0,
-    FX_DECAY = 1,
-    FX_DIFFUSION = 2,
-    FX_FILTER = 3,
-    /* Legacy aliases for compatibility with SP-1FX tools and tests */
-    FX_DUB = 0,
-    FX_REVERB = 1,
-    FX_CRUSH = 2,
-    FX_LIMITER = 3
-};
+enum { FX_MIX, FX_DECAY, FX_DIFFUSION, FX_FILTER };                  /* page 1 */
+enum { FX_MOD_DEPTH, FX_MOD_RATE, FX_PREDELAY, FX_GRIT };             /* page 2 */
+enum { FX_HALL, FX_PLATE, FX_ROOM, FX_SPRING, FX_CLOUD, FX_SHIMMER, FX_GATED, FX_REVERSE, FX_MODELS };
 
-#define PRE_DELAY_MAX 3600  /* 150 ms at 24 kHz */
-#define DIFFUSER_STAGES 4
+/* delay line lengths at 48 kHz (frames) */
+#define PRE_MAX 7201                          /* 150 ms, plus one for the interpolation */
+#define AP_IN1 773
+#define AP_IN2 587
+#define AP_IN3 409
+#define AP_IN4 307
+#define TK_AP1 1753
+#define TK_D1  4241                           /* read at about 3900 + modulation */
+#define TK_D2  3571
+#define TK_AP2 1811
+#define TK_D3  4691                           /* read at about 4360 + modulation */
+#define TK_D4  3989
+#define SH_LEN 2048    /* shimmer pitch shifter window */
+#define SPR_N  12      /* allpasses in each spring's dispersion */
 
-/* Allpass filter stage */
-typedef struct {
-    float *buf;
-    int len;
-    int idx;
-    float coeff;
-} fx_allpass;
-
-/* Modulated delay line */
-typedef struct {
-    float *buf;
-    int len;
-    int idx;
-} fx_delay;
-
-/* Polyphase halfband filter states (10 coefficients) */
-#define HB_C 10
+#define LIM_LA 48      /* safety look-ahead: 1 ms, and its latency */
+#define LIM_SEG 8
+#define LIM_NSEG (LIM_LA / LIM_SEG)
 
 typedef struct {
-    float sr, cr;             /* outside rate (48 kHz), core rate (24 kHz) */
-    int phase;                /* core frames into the current chunk */
+    float sr;
+    int phase;                       /* frames into the current chunk */
+    float fader[FX_SLOTS];           /* page 1 positions, 0..1 */
+    float param2[FX_SLOTS];          /* page 2 positions, 0..1 */
 
-    /* Fader values (0..1) */
-    float fader[FX_SLOTS];
-    float bank2[FX_SLOTS];
-    int active_bank;          /* 0 = Main Bank, 1 = Mod/Character Bank */
+    /* smoothed controls */
+    float mix, decay, diffusion, depth, predelay, grit;
+    float dry_g, wet_g, dry_t, wet_t, dry_step, wet_step;   /* ramped across each chunk */
+    float fb, damp_c, diff_c;
+    float lfo1, lfo2, lfo_inc;       /* triangle LFOs, phase 0..1 */
 
-    /* Input warm saturation & downsampling (48k -> 24k) */
-    float warm_lp[2], warm_c;
-    float dy[2][HB_C], dx0[2], dx1[2], dfirst[2];
-    int dodd;
+    /* the model, and its lengths and settings (set when it is switched in) */
+    int model, model_next;
+    float swg;                       /* the switch fade: 1 playing, 0 swapped out */
+    float in_g, in_t, in_step;       /* the reverb's input, faded in after a switch */
+    int n_ap[4], n_tap1, n_tap2, n_d2, n_d4, n_tap1x, n_tap2x;
+    float size, tank_c, depth_scale;
 
-    /* Pre-delay line */
-    float pre_buf[PRE_DELAY_MAX];
-    int pre_wpos;
-    int pre_len_target, pre_len;
+    /* GATED / REVERSE: an envelope on the reverb, keyed by the input */
+    float k_det, k_slow, k_env, k_att, k_rel, k_rel_s, k_close;
+    int k_t, k_len, k_run;
 
-    /* 4-stage input allpass diffusion */
-    float ap_in_buf1[389];
-    float ap_in_buf2[293];
-    float ap_in_buf3[203];
-    float ap_in_buf4[151];
-    int ap_in_idx[4];
-    float diff_coeff;
+    /* SHIMMER */
+    float sh_buf[SH_LEN];
+    int sh_w;
+    float sh_ph;
 
-    /* Tank delay buffers (Left and Right cross-coupled loops) */
-    float tank_d1_buf[2111];
-    float tank_ap1_buf[877];
-    float tank_d2_buf[1789];
-    float tank_d3_buf[2341];
-    float tank_ap2_buf[907];
-    float tank_d4_buf[1993];
+    /* SPRING */
+    float sp_x[2][SPR_N], sp_y[2][SPR_N];
 
-    int tank_d1_idx;
-    int tank_ap1_idx;
-    int tank_d2_idx;
-    int tank_d3_idx;
-    int tank_ap2_idx;
-    int tank_d4_idx;
+    /* pre-delay and input diffusers */
+    float pre[PRE_MAX];
+    int pre_w;
+    float ap1[AP_IN1], ap2[AP_IN2], ap3[AP_IN3], ap4[AP_IN4];
+    int ap_i[4];
 
-    /* Damping 1-pole low-pass filters in tanks */
+    /* the tank: two cross-coupled loops */
+    float t_ap1[TK_AP1], t_d1[TK_D1], t_d2[TK_D2];
+    float t_ap2[TK_AP2], t_d3[TK_D3], t_d4[TK_D4];
+    int ti_ap1, ti_d1, ti_d2, ti_ap2, ti_d3, ti_d4;
     float damp_l, damp_r;
-    float damp_coeff;
 
-    /* LFO for tank modulation */
-    float lfo_phase1, lfo_phase2;
-    float lfo_inc;
-    float mod_depth;
+    /* the reverb's filter */
+    float f_pos, f_gate, f_gate_target;
+    int f_mode;                      /* 0 high-pass, 1 low-pass */
+    fx_svf f_svf;
+    fx_svf_state f_st[2];
 
-    /* Bi-directional SVF filter */
-    float filter_pos;
-    int filter_mode;          /* 0 = flat, 1 = lowpass, 2 = highpass */
-    fx_svf svf_l, svf_r;
-    fx_svf_state svf_st_l, svf_st_r;
+    /* grit */
+    float g_q, g_inv_q, g_env, g_rel, g_wet;
 
-    /* Vintage DAC quantization (Grit) */
-    float grit_amt;
-    float grit_step;
-    float inv_grit_step;
-
-    /* Decay feedback gain */
-    float decay_gain;
-    float mix_dry, mix_wet;
-    float prev_tail_energy;
-
-    /* Upsampling (24k -> 48k) */
-    float uy[2][HB_C], ux0[2], ux1[2], usecond[2];
-    int uodd;
-
-    /* Lookahead safety ceiling at -0.3 dBFS */
-    float lim_buf[2][24];
-    int lim_pos;
-
-    /* Hardware metering & test compatibility */
-    struct {
-        float meter;
-    } limiter;
-    struct {
-        int dust_on;
-    } dub;
+    /* safety ceiling */
+    float ceiling;
+    float dl[2][LIM_LA];
+    float seg[LIM_NSEG];
+    float acc_pk;
+    int si, sn, pos_dl;
+    float sgr, s_rel, sg, sg_step;
+    float meter;                     /* deepest reduction since last read, 0..1 (1 - gain) */
 } fx_engine;
 
 void fx_init(fx_engine *e, float sr);
-void fx_set_fader(fx_engine *e, int slot, float pos);      /* pos 0..1 */
-void fx_set_bank2(fx_engine *e, int slot, float pos);      /* pos 0..1 */
-void fx_set_bank(fx_engine *e, int bank);                  /* 0 or 1 */
-void fx_process(fx_engine *e, float *l, float *r, int n);  /* in place */
-int fx_latency(const fx_engine *e);                        /* frames */
+void fx_set_fader(fx_engine *e, int slot, float pos);     /* page 1, 0..1 */
+void fx_set_param2(fx_engine *e, int slot, float pos);    /* page 2, 0..1 */
+void fx_set_model(fx_engine *e, int model);               /* FX_HALL .. FX_REVERSE */
+const char *fx_model_name(int model);
+void fx_process(fx_engine *e, float *l, float *r, int n); /* in place */
+int fx_latency(const fx_engine *e);                       /* frames */
+float fx_gain_reduction_db(const fx_engine *e);           /* the safety ceiling, from the meter */
+float fx_decay_seconds(int model, float pos);             /* the RT60 (or gate time) DECAY sets */
 
-#endif /* SP1_REVERB_FX_H */
+#endif

@@ -21,13 +21,20 @@ static void fill(void)
     }
 }
 
-void bench_init(void)
+#ifndef BENCH_MODEL
+#define BENCH_MODEL FX_SHIMMER
+#endif
+
+void bench_init(void)   /* worst case: the reverb all in, its filter, grit and modulation on */
 {
     fx_init(&E, 48000.0f);
-    fx_set_fader(&E, 0, 1.0f);
-    fx_set_fader(&E, 1, 0.15f);
-    fx_set_fader(&E, 2, 1.0f);
-    fx_set_fader(&E, 3, 1.0f);
+    fx_set_model(&E, BENCH_MODEL);
+    fx_set_fader(&E, FX_MIX, 0.7f);
+    fx_set_fader(&E, FX_DECAY, 1.0f);
+    fx_set_fader(&E, FX_DIFFUSION, 1.0f);
+    fx_set_fader(&E, FX_FILTER, 1.0f);
+    fx_set_param2(&E, FX_MOD_DEPTH, 1.0f);
+    fx_set_param2(&E, FX_GRIT, 1.0f);
 }
 
 void bench_block(void)   /* one firmware block: 128 frames */

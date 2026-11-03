@@ -1,8 +1,8 @@
 # SP-1 Reverb: Dedicated Early Digital Reverb for Teenage Engineering SP-1
 #
-#   make test       Host checks: block independence, frequency response, ceilings, clicks
+#   make test       Host checks for the engine and each of its eight models, and WAVs
 #   make firmware   sp1verb.bin (Zephyr v4.3.1 + Zephyr SDK 0.17.4; see scripts/build-firmware.sh)
-#   make bench      Cortex-M4 cycle estimate for the reverb engine (unicorn + capstone)
+#   make bench      Cortex-M4 cycle estimate (BENCH_MODEL=0..7 picks the model; unicorn + capstone)
 
 CC ?= cc
 CFLAGS := -O2 -std=gnu11 -Wall -Wextra -fno-math-errno -ffp-contract=off
