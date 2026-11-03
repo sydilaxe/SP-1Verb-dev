@@ -4,10 +4,11 @@
  * four allpass diffusers, then two cross-coupled loops (allpass, modulated delay, damping, delay),
  * Dattorro style, scaled to the model's size; stereo taps from both loops. SHIMMER pitches part of
  * the feedback up an octave; GATED and REVERSE put an envelope keyed by the input on the result.
- * SPRING: two short allpasses smear the input, then two feedback delays, each with a chain of
- * stretched allpasses in its loop (the dispersion that makes a spring chirp: the highs below
- * 4 kHz arrive later than the lows) and a diffuser, so each trip round the spring is a chirp, not
- * a click. Then the reverb's filter and grit, the mix, the safety ceiling. */
+ * SPRING: a tube-driven spring tank (Fisher Space Expander style), run at 16 kHz since a spring
+ * carries nothing above ~5 kHz: a driven input, then two springs, each a feedback delay with a
+ * long chain of stretched allpasses in its loop (the dispersion: on every trip the lows below
+ * 4 kHz arrive up to ~25 ms after the highs, the "drip"), a dark top and a thin low end.
+ * Then the reverb's filter and grit, the mix, the safety ceiling. */
 #include "fx.h"
 
 #ifdef FX_PROFILE   /* tools/bench_m4.py: keep the stages apart so their cost can be read */
@@ -84,7 +85,7 @@ static const model_t MODELS[FX_MODELS] = {
     { "HALL",        M_TANK,     1.00f, 0.6f, 30.0f, 0.0f,  8000.f, 1.00f, 1.0f, 0.50f, 1.00f },
     { "PLATE",       M_TANK,     0.55f, 0.4f, 10.0f, 0.0f, 11000.f, 1.20f, 0.4f, 0.62f, 0.95f },
     { "ROOM",        M_TANK,     0.30f, 0.2f,  3.0f, 0.0f,  7000.f, 1.00f, 0.3f, 0.50f, 1.25f },
-    { "SPRING",      M_SPRING,   1.00f, 0.4f,  6.0f, 0.0f,  4500.f, 1.00f, 0.0f, 0.00f, 1.15f },
+    { "SPRING",      M_SPRING,   1.00f, 0.4f,  6.0f, 0.0f,  4000.f, 1.00f, 0.0f, 0.00f, 1.15f },
     { "CLOUD",       M_TANK,     1.00f, 2.0f, 60.0f, 0.0f,  5500.f, 0.45f, 3.0f, 0.30f, 1.00f },
     { "SHIMMER",     M_SHIMMER,  0.90f, 1.0f, 30.0f, 0.0f,  9000.f, 1.00f, 1.0f, 0.50f, 1.00f },
     { "GATED",       M_GATE,     0.50f, 0.06f, 0.6f, 2.5f,  9000.f, 1.20f, 0.3f, 0.62f, 0.65f },
@@ -104,14 +105,13 @@ float fx_decay_seconds(int model, float pos)
 }
 
 #define HALF_LOOP_S 0.20f    /* about one trip round half of the full-size tank */
-#define SPR_L1 1789          /* the springs' delays: 37 and 40 ms */
-#define SPR_L2 1913
-#define SPR_A  0.60f         /* their dispersion: per allpass, 1.5 frames of delay at DC, 24 at 4 kHz */
-#define SPR_LOOP 140         /* what the dispersion and diffuser add to a trip, on average (frames) */
-#define SPR_IN1 151          /* the input smear, short: 3 and 5 ms */
-#define SPR_IN2 241
-#define SPR_AP1 293          /* the diffuser in each spring's loop */
-#define SPR_AP2 359
+#define SPR_DOWN 3           /* the springs run at 48 / 3 = 16 kHz */
+#define SPR_L1 347           /* the springs' delays at 16 kHz: 22 and 25 ms, plus the dispersion's */
+#define SPR_L2 397
+#define SPR_LOOP 150         /* what the dispersion adds to a trip, on average (16 kHz frames) */
+#define SPR_DRIVE 1.6f       /* the tube driver: clean when quiet, squashed when hit hard */
+#define SPR_CRASH_T 0.06f    /* a transient this far over the recent level crashes the springs */
+#define SPR_CRASH_G 2.5f     /* and this much rattle per unit over */
 
 static void model_apply(fx_engine *e, int model)
 {
@@ -126,7 +126,17 @@ static void model_apply(fx_engine *e, int model)
     __builtin_memset(e->sh_buf, 0, sizeof e->sh_buf);
     __builtin_memset(e->pre, 0, sizeof e->pre);   /* the pre-delay too: the old input would be a step */
     __builtin_memset(e->sp_d, 0, sizeof e->sp_d);
-    e->sp_i = 0;
+    __builtin_memset(e->sp_in, 0, sizeof e->sp_in); __builtin_memset(e->sp_y, 0, sizeof e->sp_y);
+    e->sp_hp[0] = e->sp_hp[1] = e->sp_hp[2] = e->sp_hp[3] = 0.0f;
+    e->sp_i = e->sp_ph = 0;
+    e->sp_fast = e->sp_slow = e->sp_crash = 0.0f;
+    e->sp_rng = 0x2545F491u;
+    fx_svf_lowpass(&e->sp_f1, 5000.0f, 0.5412f, e->sr);   /* 4th-order Butterworth */
+    fx_svf_lowpass(&e->sp_f2, 5000.0f, 1.3066f, e->sr);
+    e->sp_k[0] = step_coef(0.0003f, e->sr, 1.0f);
+    e->sp_k[1] = step_coef(0.015f, e->sr, 1.0f);
+    e->sp_k[2] = step_coef(0.250f, e->sr, 1.0f);
+    e->sp_k[3] = step_coef(0.070f, e->sr, 1.0f);
     for (int k = 0; k < 4; k++) e->ap_i[k] = 0;
     e->ti_ap1 = e->ti_d1 = e->ti_d2 = e->ti_ap2 = e->ti_d3 = e->ti_d4 = 0;
     e->damp_l = e->damp_r = 0.0f;
@@ -140,7 +150,6 @@ static void model_apply(fx_engine *e, int model)
         int n = (int)((float)ap_full[k] * (0.4f + 0.6f * s));
         e->n_ap[k] = n < 13 ? 13 : n;
     }
-    if (m->flags & M_SPRING) { e->n_ap[0] = SPR_IN1; e->n_ap[1] = SPR_IN2; }
     e->n_tap1 = (int)(1753.0f * s); if (e->n_tap1 < 31) e->n_tap1 = 31;   /* tank allpass lengths */
     e->n_tap2 = (int)(1811.0f * s); if (e->n_tap2 < 37) e->n_tap2 = 37;
     e->n_tap1x = (int)(3900.0f * s);                                      /* modulated delays */
@@ -197,12 +206,18 @@ STAGE static void control(fx_engine *e)
 
     /* decay: the loops' gain for the RT60, and a darker tail as it gets longer */
     float rt = (m->flags & (M_GATE | M_REVERSE)) ? m->rt_fixed : fx_decay_seconds(e->model, e->decay);
-    float loop = (m->flags & M_SPRING) ? (float)(SPR_L1 + SPR_LOOP) / sr : HALF_LOOP_S * e->size;
+    const float ssr = sr / (float)SPR_DOWN;                         /* the springs' rate */
+    float loop = (m->flags & M_SPRING) ? (float)(SPR_L1 + SPR_LOOP) / ssr : HALF_LOOP_S * e->size;
     e->fb = fx_exp2f(-9.9657843f * loop / rt);                       /* 10^(-3 T / RT60) */
     if ((m->flags & M_SHIMMER) && e->fb > 0.93f) e->fb = 0.93f;       /* the octave adds energy */
     /* the spring's loop is short: the same darkening per trip would kill its tail */
     float fc = (m->flags & M_SPRING) ? m->damp_hz : m->damp_hz * fx_exp2f(-1.3f * e->decay);
-    e->damp_c = 1.0f - fx_exp2f(-1.44269504f * 2.0f * FX_PI * fc / sr);
+    e->damp_c = 1.0f - fx_exp2f(-1.44269504f * 2.0f * FX_PI * fc / ((m->flags & M_SPRING) ? ssr : sr));
+    if (m->flags & M_SPRING) {
+        e->sp_hc = 1.0f - fx_exp2f(-1.44269504f * 2.0f * FX_PI * 40.0f / ssr);    /* no rumble builds up */
+        e->sp_oc = 1.0f - fx_exp2f(-1.44269504f * 2.0f * FX_PI * 220.0f / ssr);   /* the pickup: thin lows */
+        e->sp_a = -(0.55f + 0.2f * e->diffusion);   /* negative: the lows arrive last */
+    }
     e->diff_c = fx_clampf((0.30f + 0.45f * e->diffusion) * m->diff_scale, 0.0f, 0.85f);
     e->lfo_inc = (0.2f + 4.3f * e->param2[FX_MOD_RATE]) / sr;
     if (m->flags & (M_GATE | M_REVERSE)) {
@@ -318,53 +333,85 @@ STAGE static void reverb_tank(fx_engine *e, const float *l, const float *r, floa
     e->lfo1 = l1; e->lfo2 = l2; e->damp_l = dl; e->damp_r = dr; e->pre_w = pw; e->in_g = ig;
 }
 
-/* SPRING: two springs, each a feedback delay with the dispersion chain and a diffuser in its loop */
+/* SPRING: two springs at 16 kHz, each a feedback delay with the dispersion in its loop */
 STAGE static void reverb_spring(fx_engine *e, const float *l, const float *r, float *wl, float *wr, int n)
 {
-    const float fb = e->fb, dc = e->damp_c, pd = e->predelay;
-    const float c1 = e->diff_c, c2 = 0.5f + 0.25f * e->diffusion;
-    const float depth = 6.0f * e->depth, inc = e->lfo_inc;
-    float l1 = e->lfo1, dl = e->damp_l, dr = e->damp_r;
+    const float fb = e->fb, dc = e->damp_c, hc = e->sp_hc, oc = e->sp_oc, pd = e->predelay, a = e->sp_a;
+    const float depth = 2.0f * e->depth, inc = e->lfo_inc * (float)SPR_DOWN;
+    const fx_svf F1 = e->sp_f1, F2 = e->sp_f2;
+    /* the crash's detector (attack 0.3 ms, release 15 ms, against a 250 ms average) and its burst (70 ms) */
+    const float k_att = e->sp_k[0], k_rel = e->sp_k[1], k_avg = e->sp_k[2], k_cr = e->sp_k[3];
+    float fast = e->sp_fast, slow = e->sp_slow, cr = e->sp_crash;
+    uint32_t rng = e->sp_rng;
+    float l1 = e->lfo1, dl = e->damp_l, dr = e->damp_r, h1 = e->sp_hp[0], h2 = e->sp_hp[1];
+    float p1 = e->sp_hp[2], p2 = e->sp_hp[3];
+    float q1 = e->sp_y[0], c1 = e->sp_y[1], q2 = e->sp_y[2], c2 = e->sp_y[3];
     float ig = e->in_g;
     const float is = e->in_step;
-    int pw = e->pre_w, j = e->sp_i;
+    int pw = e->pre_w, j = e->sp_i, ph = e->sp_ph;
     for (int i = 0; i < n; i++) {
         ig += is;
         float sg = ig * ig * (3.0f - 2.0f * ig);   /* an S-curve: no corners at either end */
         e->pre[pw] = 0.5f * sg * (l[i] + r[i]);
         float x = tap(e->pre, PRE_MAX, pw, pd);
         pw = pw + 1 < PRE_MAX ? pw + 1 : 0;
-        /* the input, smeared over a few ms: the spring is struck by a burst, not a click */
-        x = allpass(x, e->ap1, SPR_IN1, &e->ap_i[0], c1);
-        x = allpass(x, e->ap2, SPR_IN2, &e->ap_i[1], c1);
-        l1 += inc; if (l1 >= 1.0f) l1 -= 1.0f;
-        float m = depth * (1.0f + tri(l1));
+        /* the crash: a sharp hit well over the recent level shakes the springs against each other,
+         * a burst of rattle into the tank that the springs then chirp and ring out */
+        float ax = fx_absf(x);
+        fast += (ax - fast) * (ax > fast ? k_att : k_rel);
+        slow += (fast - slow) * k_avg;
+        float over = fast - 2.0f * slow - SPR_CRASH_T;
+        if (over > 0.0f && SPR_CRASH_G * over > cr) cr = SPR_CRASH_G * over;
+        else cr -= cr * k_cr;
+        if (cr > 1e-6f) x += cr * fx_noise(&rng);
+        else cr = 0.0f;
+        /* the tube driver, then down to 16 kHz */
+        x = fx_softclip(SPR_DRIVE * x) * (1.0f / SPR_DRIVE);
+        x = fx_svf_run(&F1, &e->sp_in[0], x);
+        x = fx_svf_run(&F2, &e->sp_in[1], x);
 
-        float s1 = tap(e->t_d1, TK_D1, e->ti_d1, (float)SPR_L1 + m);
-        float s2 = tap(e->t_d3, TK_D3, e->ti_d3, (float)SPR_L2 - m);
-        /* the dispersion: allpasses (a + z^-K) / (1 + a z^-K), one state each, K frames back */
-        float *b1 = e->sp_d[0][j], *b2 = e->sp_d[1][j];
-        for (int k = 0; k < SPR_N; k++) {
-            float d1 = b1[k], d2 = b2[k];
-            float v1 = s1 - SPR_A * d1, v2 = s2 - SPR_A * d2;
-            b1[k] = v1; b2[k] = v2;
-            s1 = d1 + SPR_A * v1; s2 = d2 + SPR_A * v2;
+        if (ph == 0) {
+            l1 += inc; if (l1 >= 1.0f) l1 -= 1.0f;
+            float m = depth * (1.0f + tri(l1));
+            float s1 = tap(e->t_d1, TK_D1, e->ti_d1, (float)SPR_L1 + m);
+            float s2 = tap(e->t_d3, TK_D3, e->ti_d3, (float)SPR_L2 - m);
+            /* the dispersion: allpasses (a + z^-K) / (1 + a z^-K), one state each, K frames back */
+            float *b1 = e->sp_d[0][j], *b2 = e->sp_d[1][j];
+            for (int k = 0; k < SPR_N; k++) {
+                float d1 = b1[k], d2 = b2[k];
+                float v1 = s1 - a * d1, v2 = s2 - a * d2;
+                b1[k] = v1; b2[k] = v2;
+                s1 = d1 + a * v1; s2 = d2 + a * v2;
+            }
+            j = j + 1 < SPR_K ? j + 1 : 0;
+            /* a dark top, a little more each trip, and no rumble */
+            dl += dc * (s1 - dl);
+            dr += dc * (s2 - dr);
+            h1 += hc * (dl - h1);
+            h2 += hc * (dr - h2);
+            float o1 = dl - h1, o2 = dr - h2;
+            /* two springs of different lengths: independent, so the stereo stays wide */
+            e->t_d1[e->ti_d1] = x + fb * o1;
+            e->t_d3[e->ti_d3] = x - fb * o2;
+            e->ti_d1 = e->ti_d1 + 1 < TK_D1 ? e->ti_d1 + 1 : 0;
+            e->ti_d3 = e->ti_d3 + 1 < TK_D3 ? e->ti_d3 + 1 : 0;
+            /* the pickup hears little below ~200 Hz */
+            p1 += oc * (o1 - p1);
+            p2 += oc * (o2 - p2);
+            q1 = c1; q2 = c2;
+            c1 = o1 - p1; c2 = o2 - p2;
         }
-        j = j + 1 < SPR_K ? j + 1 : 0;
-        s1 = allpass(s1, e->t_ap1, SPR_AP1, &e->ti_ap1, c2);
-        s2 = allpass(s2, e->t_ap2, SPR_AP2, &e->ti_ap2, c2);
-        /* the tank's band: a spring carries little above 4-5 kHz */
-        dl += dc * (s1 - dl);
-        dr += dc * (s2 - dr);
-        /* two springs of different lengths: independent, so the stereo stays wide */
-        e->t_d1[e->ti_d1] = x + fb * dl;
-        e->t_d3[e->ti_d3] = x - fb * dr;
-        e->ti_d1 = e->ti_d1 + 1 < TK_D1 ? e->ti_d1 + 1 : 0;
-        e->ti_d3 = e->ti_d3 + 1 < TK_D3 ? e->ti_d3 + 1 : 0;
-        wl[i] = 0.7f * dl;
-        wr[i] = 0.7f * dr;
+        /* back up to 48 kHz: a straight line between the springs' frames (the top is dark already) */
+        float t = (float)ph * (1.0f / SPR_DOWN);
+        wl[i] = 2.1f * (q1 + t * (c1 - q1));
+        wr[i] = 2.1f * (q2 + t * (c2 - q2));
+        ph = ph + 1 < SPR_DOWN ? ph + 1 : 0;
     }
-    e->lfo1 = l1; e->damp_l = dl; e->damp_r = dr; e->pre_w = pw; e->in_g = ig; e->sp_i = j;
+    e->lfo1 = l1; e->damp_l = dl; e->damp_r = dr;
+    e->sp_hp[0] = h1; e->sp_hp[1] = h2; e->sp_hp[2] = p1; e->sp_hp[3] = p2;
+    e->pre_w = pw; e->in_g = ig; e->sp_i = j; e->sp_ph = ph;
+    e->sp_fast = fast; e->sp_slow = slow; e->sp_crash = cr; e->sp_rng = rng;
+    e->sp_y[0] = q1; e->sp_y[1] = c1; e->sp_y[2] = q2; e->sp_y[3] = c2;
 }
 
 /* GATED / REVERSE: the input's level opens a gate on the reverb */

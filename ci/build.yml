@@ -110,6 +110,8 @@ jobs:
             grep -q "^$m: sweep every control: no clicks .* ok" $r
           done
           grep -q "^SPRING: smooth tail, no echo train .* ok" $r
+          grep -q "^SPRING: 400 Hz arrives after 3 kHz in a trip, the drip .* ok" $r
+          grep -q "^SPRING: a hard hit crashes.* ok" $r
           grep -q "^models: switching every 0.5 s while playing: no clicks .* ok" $r
           grep -q "^filter: flat anywhere in the middle fifth .* ok" $r
 
