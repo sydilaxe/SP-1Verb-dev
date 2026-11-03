@@ -250,19 +250,6 @@ static double corr(const float *a, const float *b, int from, int n)
     return sab / sqrt(saa * sbb + 1e-30);
 }
 
-/* energy-weighted arrival time of a band within a window (frames) */
-static double band_centroid(const float *x, int from, int to, double lo, double hi)
-{
-    bq a, b, c, d; bq_set(&a, 1, lo); bq_set(&b, 1, lo); bq_set(&c, 0, hi); bq_set(&d, 0, hi);
-    double sw = 0, s = 0;
-    for (int i = 0; i < to; i++) {
-        double y = bq_run(&d, bq_run(&c, bq_run(&b, bq_run(&a, x[i]))));
-        if (i >= from) { sw += y * y * i; s += y * y; }
-    }
-    return sw / (s + 1e-30);
-}
-
-
 /* how spiky a tail is: in each 40 ms block the loudest 1 ms against the block's average (dB),
  * averaged over the blocks. A dense tail sits near 5 dB; a train of discrete echoes far higher. */
 static double flutter_db(const float *x, int from, int to)
@@ -279,6 +266,22 @@ static double flutter_db(const float *x, int from, int to)
         if (sum > 0) { acc += 10 * log10(mx / (sum / B)); nb++; }
     }
     return nb ? acc / nb : 0;
+}
+
+
+/* when a narrow band (around hz) peaks within [from, to): frames */
+static int band_peak_at(const float *x, int from, int to, double hz)
+{
+    double w = 2 * M_PI * hz / SR, al = sin(w) / 8.0, a0 = 1 + al;
+    double b0 = al / a0, b2 = -al / a0, a1 = -2 * cos(w) / a0, a2 = (1 - al) / a0, z1 = 0, z2 = 0, env = 0, best = 0;
+    int at = -1;
+    for (int i = 0; i < to; i++) {
+        double y = b0 * x[i] + z1;
+        z1 = -a1 * y + z2; z2 = b2 * x[i] - a2 * y;
+        env += (y * y - env) * 0.01;
+        if (i >= from && env > best) { best = env; at = i; }
+    }
+    return at;
 }
 
 /* amplitude of one frequency (a single DFT bin) */
@@ -463,14 +466,23 @@ int main(int argc, char **argv)
         check(oct[0] > -10, "SHIMMER: the octave (880 Hz) in the tail vs 440 Hz (dB)", oct[0]);
         check(oct[0] - oct[1] > 15, "SHIMMER: far more octave than HALL (dB)", oct[0] - oct[1]);
     }
-    {   /* SPRING: dispersion: in the first trip the highs (below 4 kHz) arrive after the lows. The
-         * measuring filters' own delay is taken out, from a plain impulse through the same bands. */
-        impulse(FX_SPRING, 0.3f, 0.0f, hl, hr, SR);
-        int a = 200 + 1789, b = a + 700;
-        double lo = band_centroid(hl, a, b, 300, 600), hi = band_centroid(hl, a, b, 2000, 3500);
-        memset(hr, 0, 4 * SR); hr[a] = 1.0f;
-        lo -= band_centroid(hr, a, b, 300, 600); hi -= band_centroid(hr, a, b, 2000, 3500);
-        check(hi - lo > 20, "SPRING: highs arrive after lows in a trip (frames)", hi - lo);
+    {   /* SPRING: dispersion: in the first trip the lows arrive well after the highs (the drip) */
+        impulse(FX_SPRING, 0.0f, 0.7f, hl, hr, SR);
+        int a = 200 + 3 * 347, b = a + 3 * 500;   /* the first trip */
+        double lo = band_peak_at(hl, a, b, 400), hi = band_peak_at(hl, a, b, 3000);
+        check(lo - hi > 480, "SPRING: 400 Hz arrives after 3 kHz in a trip, the drip (frames)", lo - hi);
+    }
+    {   /* SPRING: a hard hit crashes the springs (a burst of rattle); a soft one only rings them */
+        double e[2]; const float amp[2] = { 0.03f, 0.9f };
+        for (int k = 0; k < 2; k++) {
+            start(FX_SPRING); faders(1.0f, 0.3f, 0.7f, 0.5f); fx_set_param2(&E, FX_PREDELAY, 0.0f);
+            memset(hl, 0, 4 * SR); memset(hr, 0, 4 * SR);
+            for (int i = 0; i < 96; i++) hl[SR / 10 + i] = hr[SR / 10 + i] = amp[k] * (float)sin(2 * M_PI * 250.0 * i / SR);
+            for (int i = 0; i < SR; i += 256) fx_process(&E, hl + i, hr + i, SR - i < 256 ? SR - i : 256);
+            e[k] = band_db(hl, SR / 10 + 200, SR / 2, 2000, 4500) - 20 * log10(amp[k]);
+            if (k) wav_write(dir, "spring_crash.wav", hl, hr, SR);
+        }
+        check(e[1] - e[0] > 10, "SPRING: a hard hit crashes: rattle over a soft one, per level (dB)", e[1] - e[0]);
     }
     {   /* SPRING: a smeared tail, not a train of discrete clicks (it was ~16 dB; HALL ~4) */
         for (int k = 0; k < 2; k++) {

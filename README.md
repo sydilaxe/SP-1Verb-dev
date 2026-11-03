@@ -21,7 +21,7 @@ dry signal never moves.
 | TRACK 1 | **Hall** | a large modulated tank: lush and long | 0.6 to 30 s |
 | TRACK 2 | **Plate** | dense and bright, builds fast | 0.4 to 10 s |
 | TRACK 3 | **Room** | small and short | 0.2 to 3 s |
-| TRACK 4 | **Spring** | two dispersive springs: the chirp and drip of a spring tank, dark above 4 kHz like the real thing | 0.4 to 6 s |
+| TRACK 4 | **Spring** | a 60s tube spring tank in the style of the Fisher Space Expander: a long "drip" on every trip, thin lows, dark highs, and a crash when a hard hit shakes the springs. DIFFUSION sets how much drip | 0.4 to 6 s |
 | TRACK 1, again | **Cloud** | huge, sparse and heavily modulated: a scattered ambient wash | 2 to 60 s |
 | TRACK 2, again | **Shimmer** | an octave up in the tank's feedback, so each echo climbs | 1 to 30 s |
 | TRACK 3, again | **Gated** | the 80s drum reverb: dense while the hit lasts, then cut off | gate time, 60 to 600 ms |
@@ -30,7 +30,7 @@ dry signal never moves.
 Each model is tested on its own (`make test`): decay time against the setting, stereo width,
 level against the dry, no clicks while every control sweeps, silence in giving silence out, and
 the same output for any block size. On top of that: the gate closes, the reverse swell rises, the
-shimmer carries the octave, the springs disperse (in each trip the highs arrive after the lows) and their tails are smooth, not a train of echoes, and switching models
+shimmer carries the octave, the springs drip (in each trip the lows arrive ~15 ms after the highs), crash on a hard hit but not a soft one, and their tails are smooth, not a train of echoes, and switching models
 while playing doesn't click.
 
 ## The faders

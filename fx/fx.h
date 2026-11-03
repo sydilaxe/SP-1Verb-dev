@@ -4,7 +4,9 @@
  *   HALL     a large modulated tank: lush and long
  *   PLATE    dense and bright, builds fast
  *   ROOM     small and short
- *   SPRING   two dispersive springs: the chirp and drip of a spring tank (DIFFUSION: its smear)
+ *   SPRING   a 60s tube spring tank, Fisher Space Expander style: two springs, a long dispersive
+ *            drip on every trip, thin lows, dark highs, a driven input, and a crash when a hard
+ *            transient hits it (DIFFUSION: how much drip)
  *   CLOUD    huge, sparse, heavily modulated: a scattered ambient wash
  *   SHIMMER  an octave up in the tank's feedback: each echo climbs
  *   GATED    the 80s non-linear drum reverb: dense, then cut off (DECAY sets the gate time)
@@ -58,8 +60,8 @@ enum { FX_HALL, FX_PLATE, FX_ROOM, FX_SPRING, FX_CLOUD, FX_SHIMMER, FX_GATED, FX
 #define TK_D3  4691                           /* read at about 4360 + modulation */
 #define TK_D4  3989
 #define SH_LEN 2048    /* shimmer pitch shifter window */
-#define SPR_N  12      /* allpasses in each spring's dispersion */
-#define SPR_K  6       /* each stretched to 6 frames: the chirps sit below 4 kHz, as in a tank */
+#define SPR_N  40      /* allpasses in each spring's dispersion */
+#define SPR_K  2       /* each stretched to 2 frames at 16 kHz: the chirps sit below 4 kHz */
 
 #define LIM_LA 48      /* safety look-ahead: 1 ms, and its latency */
 #define LIM_SEG 8
@@ -95,7 +97,15 @@ typedef struct {
 
     /* SPRING */
     float sp_d[2][SPR_K][SPR_N];   /* the dispersion's state, frame by frame */
-    int sp_i;
+    int sp_i, sp_ph;                /* the springs run at 16 kHz: sp_ph counts 48 kHz frames, 0..2 */
+    fx_svf sp_f1, sp_f2;            /* 5 kHz low-pass (two sections): down to 16 kHz */
+    fx_svf_state sp_in[2];
+    float sp_y[4];                  /* back up to 48 kHz: each spring's last two frames */
+    float sp_hp[4], sp_hc, sp_oc;   /* the springs' low end: in the loop, and at the pickup */
+    float sp_a;                     /* the dispersion's strength (DIFFUSION) */
+    float sp_fast, sp_slow, sp_crash; /* a hard hit rattles the springs: the crash */
+    uint32_t sp_rng;
+    float sp_k[4];
 
     /* pre-delay and input diffusers */
     float pre[PRE_MAX];
