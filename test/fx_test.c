@@ -1,7 +1,7 @@
-/* Host test for the SP-1 effects engine: renders WAVs into build/sp1 and checks the behaviour.
- *   fx_test [OUTDIR]                       run the checks and write the WAVs
- *   fx_test OUTDIR IN.wav F1 F2 F3 F4      also run a 48 kHz stereo 16/24-bit WAV through the
- *                                          chain at those fader positions (0..1) */
+/* Host test for the SP-1 Reverb engine: renders WAVs into build/test and checks the behaviour of
+ *   the engine and of each of its eight models.
+ *   fx_test [OUTDIR]                          run the checks and write the WAVs
+ *   fx_test OUTDIR IN.wav MODEL F1 F2 F3 F4   also run a 48 kHz WAV through that model and faders */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -180,6 +180,7 @@ static double click_ratio(const float *x, int n)
     return worst;
 }
 
+
 static void faders(float f1, float f2, float f3, float f4)
 {
     fx_set_fader(&E, FX_MIX, f1);
@@ -188,9 +189,22 @@ static void faders(float f1, float f2, float f3, float f4)
     fx_set_fader(&E, FX_FILTER, f4);
 }
 
-static void run(const float *il, const float *ir, float *ol, float *orr, int n, float f1, float f2, float f3, float f4, int block)
+/* a fresh engine on a model (already switched in) */
+static void start(int model)
 {
     fx_init(&E, SR);
+    if (model != FX_HALL) {
+        static float zl[4096], zr[4096];
+        fx_set_model(&E, model);
+        memset(zl, 0, sizeof zl); memset(zr, 0, sizeof zr);
+        fx_process(&E, zl, zr, 4096);
+    }
+}
+
+static void run_m(int model, const float *il, const float *ir, float *ol, float *orr, int n,
+                  float f1, float f2, float f3, float f4, int block)
+{
+    start(model);
     faders(f1, f2, f3, f4);
     memcpy(ol, il, sizeof(float) * n); memcpy(orr, ir, sizeof(float) * n);
     unsigned s = 7;
@@ -202,12 +216,69 @@ static void run(const float *il, const float *ir, float *ol, float *orr, int n, 
     }
 }
 
+/* the reverb alone, for an impulse, MIX at the top */
+static void impulse(int model, float decay, float diff, float *l, float *r, int n)
+{
+    start(model);
+    faders(1.0f, decay, diff, 0.5f);
+    fx_set_param2(&E, FX_PREDELAY, 0.0f);
+    memset(l, 0, 4 * n); memset(r, 0, 4 * n);
+    l[200] = r[200] = 0.5f;
+    for (int i = 0; i < n; i += 256) fx_process(&E, l + i, r + i, n - i < 256 ? n - i : 256);
+}
+
+/* RT60 from the impulse response: Schroeder's backward integral, fitted from -5 to -25 dB */
+static double rt60(const float *l, const float *r, int n)
+{
+    double *e = malloc(sizeof(double) * n), s = 0;
+    for (int i = n - 1; i >= 0; i--) { s += (double)l[i] * l[i] + (double)r[i] * r[i]; e[i] = s; }
+    int a = -1, b = -1;
+    for (int i = 0; i < n; i++) {
+        double db = 10 * log10(e[i] / e[0] + 1e-30);
+        if (a < 0 && db < -5) a = i;
+        if (b < 0 && db < -25) { b = i; break; }
+    }
+    free(e);
+    if (a < 0 || b < 0) return 1e9;
+    return 3.0 * (double)(b - a) / SR;
+}
+
+static double corr(const float *a, const float *b, int from, int n)
+{
+    double sab = 0, saa = 0, sbb = 0;
+    for (int i = from; i < n; i++) { sab += (double)a[i] * b[i]; saa += (double)a[i] * a[i]; sbb += (double)b[i] * b[i]; }
+    return sab / sqrt(saa * sbb + 1e-30);
+}
+
+/* energy-weighted arrival time of a band within a window (frames) */
+static double band_centroid(const float *x, int from, int to, double lo, double hi)
+{
+    bq a, b, c, d; bq_set(&a, 1, lo); bq_set(&b, 1, lo); bq_set(&c, 0, hi); bq_set(&d, 0, hi);
+    double sw = 0, s = 0;
+    for (int i = 0; i < to; i++) {
+        double y = bq_run(&d, bq_run(&c, bq_run(&b, bq_run(&a, x[i]))));
+        if (i >= from) { sw += y * y * i; s += y * y; }
+    }
+    return sw / (s + 1e-30);
+}
+
+/* amplitude of one frequency (a single DFT bin) */
+static double tone_db(const float *x, int from, int n, double hz)
+{
+    double a = 0, b = 0, w = 2 * M_PI * hz / SR;
+    for (int i = from; i < n; i++) { a += x[i] * cos(w * i); b += x[i] * sin(w * i); }
+    return 20 * log10(2 * sqrt(a * a + b * b) / (n - from) + 1e-30);
+}
+
 int main(int argc, char **argv)
 {
-    const char *dir = argc > 1 ? argv[1] : "build/sp1";
+    const char *dir = argc > 1 ? argv[1] : "build/test";
     const int N = 8 * SR, W = SR;  /* 8 s; measure after the first second */
     float *il = malloc(4 * N), *ir = malloc(4 * N), *l = malloc(4 * N), *r = malloc(4 * N);
     float *l2 = malloc(4 * N), *r2 = malloc(4 * N);
+    const int NI = 14 * SR;
+    float *hl = malloc(4 * NI), *hr = malloc(4 * NI);
+    char name[160];
     make_loop(il, ir, N);
     wav_write(dir, "loop_dry.wav", il, ir, N);
     int lat = fx_latency(&E);
@@ -221,140 +292,232 @@ int main(int argc, char **argv)
     check(ee < 1e-5, "math: exp2 relative error", ee);
     check(el < 1e-4, "math: log2 absolute error", el);
 
-    /* at rest: the input, warm (the 24 kHz core, the warm stage), at the stated latency */
-    run(il, ir, l, r, N, 0.0f, 0.5f, 0.7f, 0.5f, 256);
+    /* ---- MIX at the bottom: the input, exactly ---- */
     {
-        int best = 0; double bc = -1;
-        for (int d = 0; d < 400; d++) {
-            double sxy = 0, sxx = 0, syy = 0;
-            for (int i = W; i < W + SR; i++) { sxy += l[i] * il[i - d]; sxx += (double)l[i] * l[i]; syy += (double)il[i - d] * il[i - d]; }
-            double c = sxy / sqrt(sxx * syy);
-            if (c > bc) { bc = c; best = d; }
-        }
-        check(abs(best - lat) <= 1, "rest: the input comes out at the stated latency (frames)", best);
-        check(bc > 0.98, "rest: and still the input (correlation)", bc);
-        check(fabs(rms_db(l, W, N) - rms_db(il, W, N)) < 1.0, "rest: level change (dB)", rms_db(l, W, N) - rms_db(il, W, N));
-
-        /* 15 kHz tone above the 24k Nyquist: rejected by polyphase half-band */
+        run_m(FX_HALL, il, ir, l, r, N, 0.0f, 0.5f, 0.7f, 0.5f, 256);
+        int exact = 1;
+        for (int i = lat; i < N; i++) if (l[i] != il[i - lat] || r[i] != ir[i - lat]) { exact = 0; break; }
+        check(exact, "dry: bit-exact input at the stated latency", exact);
         float *tl = malloc(4 * N), *tr = malloc(4 * N);
-        for (int i = 0; i < N; i++) tl[i] = tr[i] = 0.1f * (float)sin(2 * M_PI * 15000.0 * i / SR);
-        run(tl, tr, l2, r2, N, 0.0f, 0.5f, 0.7f, 0.5f, 256);
-        double rej = rms_db(l2, W, N) - rms_db(tl, W, N);
-        check(rej < -70, "rest: a 15 kHz tone is gone, no alias (dB)", rej);
-        free(tl); free(tr);
-    }
-    {   /* clean: 1 kHz tone at -6 dBFS */
-        float *tl = malloc(4 * N), *tr = malloc(4 * N);
-        for (int i = 0; i < N; i++) tl[i] = tr[i] = 0.5f * (float)sin(2 * M_PI * 997.0 * i / SR);
-        run(tl, tr, l, r, N, 0.0f, 0.5f, 0.7f, 0.5f, 256);
-        double sig = rms_db(l, W, N), e = 0;
-        double a0 = 0, b0 = 0;
-        for (int h = 1; h <= 11; h++) {
-            double a = 0, b = 0, w = 2 * M_PI * 997.0 * h / SR;
-            for (int i = W; i < N; i++) { a += l[i] * cos(w * i); b += l[i] * sin(w * i); }
-            a *= 2.0 / (N - W); b *= 2.0 / (N - W);
-            if (h == 1) { a0 = a; b0 = b; }
-            e += (a * a + b * b) / 2;
-        }
-        double tot = 0; for (int i = W; i < N; i++) tot += (double)l[i] * l[i];
-        tot /= (N - W);
-        double noise = 10 * log10(fmax(tot - e, 1e-30)) - sig;
-        double thd = 10 * log10(fmax(e - (a0 * a0 + b0 * b0) / 2, 1e-30) / ((a0 * a0 + b0 * b0) / 2));
-        check(noise < -80, "rest: noise and aliasing on a -6 dBFS 1 kHz tone (dB)", noise);
-        check(thd < -30 && thd > -60, "rest: warm stage harmonics on it (THD dB)", thd);
+        for (int i = 0; i < N; i++) tl[i] = tr[i] = 0.25f * (float)sin(2 * M_PI * 18000.0 * i / SR);
+        run_m(FX_HALL, tl, tr, l2, r2, N, 0.0f, 0.5f, 0.7f, 0.5f, 256);
+        double g = rms_db(l2, W, N) - rms_db(tl, W, N);
+        check(fabs(g) < 0.01, "dry: an 18 kHz tone passes (full bandwidth) (dB)", g);
+        /* and the reverb itself reaches the top too */
+        run_m(FX_PLATE, tl, tr, l2, r2, N, 1.0f, 0.5f, 0.7f, 0.5f, 256);
+        g = rms_db(l2, W, N) - rms_db(tl, W, N);
+        check(g > -30, "wet: an 18 kHz tone makes reverb (PLATE) (dB)", g);
         free(tl); free(tr);
     }
 
-    /* Block size invariance */
-    run(il, ir, l, r, N, 0.5f, 0.5f, 0.7f, 0.5f, 256);
-    run(il, ir, l2, r2, N, 0.5f, 0.5f, 0.7f, 0.5f, 0);
-    check(!memcmp(l, l2, 4 * N) && !memcmp(r, r2, 4 * N), "blocks of 256 and of 1..300: same output", 1);
-    check(finite_all(l, r, N), "full chain: all samples finite", 1);
-    check(peak(l, r, N) <= 0.9661, "full chain: peak under the -0.3 dBFS ceiling", peak(l, r, N));
-    wav_write(dir, "chain_reverb.wav", l, r, N);
+    /* ---- every model ---- */
+    for (int m = 0; m < FX_MODELS; m++) {
+        const char *mn = fx_model_name(m);
+        int gate = m == FX_GATED || m == FX_REVERSE;
 
-    /* ---- 1: reverb mix & tone ---- */
-    double rms0, rms1;
-    run(il, ir, l, r, N, 0.0f, 0.5f, 0.7f, 0.5f, 256);
-    rms0 = rms_db(l, W, N);
-    run(il, ir, l, r, N, 0.5f, 0.5f, 0.7f, 0.5f, 256);
-    wav_write(dir, "reverb_050.wav", l, r, N);
-    run(il, ir, l, r, N, 1.0f, 0.5f, 0.7f, 0.5f, 256);
-    wav_write(dir, "reverb_100.wav", l, r, N);
-    rms1 = rms_db(l, W, N);
-    check(rms1 > -40.0, "reverb: full wet output present (dB)", rms1);
-    check(fabs(rms1 - rms0) < 6.0, "reverb: loudness consistency dry vs wet (dB)", rms1 - rms0);
+        /* the output does not depend on the block size */
+        run_m(m, il, ir, l, r, N, 0.6f, 0.6f, 0.7f, 0.3f, 256);
+        run_m(m, il, ir, l2, r2, N, 0.6f, 0.6f, 0.7f, 0.3f, 0);
+        snprintf(name, sizeof name, "%s: blocks of 256 and of 1..300, same output", mn);
+        check(!memcmp(l, l2, 4 * N) && !memcmp(r, r2, 4 * N), name, 1);
 
-    /* silence test: no DC on output */
-    {
-        float *zl = calloc(N, 4), *zr = calloc(N, 4);
-        run(zl, zr, l, r, N, 1.0f, 0.5f, 0.7f, 0.5f, 256);
-        double m = 0; for (int i = W; i < N; i++) m += l[i] + r[i];
-        m /= 2.0 * (N - W);
-        double d = rms_db(l, W, N);
-        check(d < -60.0, "reverb: noise floor on silence (dBFS)", d);
-        check(fabs(m) < 1e-4, "reverb: no DC on silence", m);
-        wav_write(dir, "reverb_silence.wav", l, r, N);
-        free(zl); free(zr);
-    }
+        /* the reverb at full, on the loop: there, finite, near the dry level, under the ceiling */
+        run_m(m, il, ir, l, r, N, 1.0f, 0.6f, 0.7f, 0.5f, 256);
+        snprintf(name, sizeof name, "reverb_%s.wav", mn);
+        for (char *c = name; *c; c++) if (*c >= 'A' && *c <= 'Z') *c += 32;
+        wav_write(dir, name, l, r, N);
+        snprintf(name, sizeof name, "%s: all samples finite", mn);
+        check(finite_all(l, r, N), name, 1);
+        double lv = rms_db(l, W, N) - rms_db(il, W, N);
+        snprintf(name, sizeof name, "%s: reverb level vs dry (dB)", mn);
+        check(lv > -8 && lv < 6, name, lv);
+        snprintf(name, sizeof name, "%s: stereo (L/R correlation of the reverb)", mn);
+        double cc = corr(l, r, W, N);
+        check(cc < 0.8, name, cc);
 
-    /* ---- clicks: smooth fader sweeps on steady tone ---- */
-    {
-        for (int i = 0; i < N; i++) il[i] = ir[i] = 0.25f * (float)sin(2 * M_PI * 220.0 * i / SR);
-        fx_init(&E, SR);
-        memcpy(l, il, 4 * N); memcpy(r, ir, 4 * N);
-        for (int i = 0; i < N; i += 64) {
-            double t = (double)i / N;
-            double tri = t < 0.5 ? 2 * t : 2 - 2 * t;
-            faders((float)tri, (float)(0.5 + 0.5 * sin(2 * M_PI * 2 * t)), (float)tri, (float)tri);
-            fx_process(&E, l + i, r + i, 64);
+        /* loud: decay at the top, input +5.6 dB hot: still finite and under the ceiling */
+        for (int i = 0; i < N; i++) { l2[i] = il[i] * 1.9f; r2[i] = ir[i] * 1.9f; }
+        float *ol = malloc(4 * N), *orr = malloc(4 * N);
+        run_m(m, l2, r2, ol, orr, N, 0.7f, 1.0f, 1.0f, 0.5f, 256);
+        snprintf(name, sizeof name, "%s: decay full, hot input: peak under -0.3 dBFS", mn);
+        check(finite_all(ol, orr, N) && peak(ol, orr, N) <= 0.9661, name, peak(ol, orr, N));
+        free(ol); free(orr);
+
+        /* silence in, silence out */
+        {
+            float *zl = calloc(N, 4), *zr = calloc(N, 4);
+            run_m(m, zl, zr, l, r, N, 1.0f, 1.0f, 0.7f, 0.5f, 256);
+            snprintf(name, sizeof name, "%s: silence in, silence out", mn);
+            check(peak(l, r, N) == 0.0, name, peak(l, r, N));
+            free(zl); free(zr);
         }
-        double cr = fmax(click_ratio(l, N), click_ratio(r, N));
-        check(cr < 15, "sweep all faders: no clicks (worst window vs neighbours)", cr);
-        check(finite_all(l, r, N), "sweep all faders: all samples finite", 1);
-        wav_write(dir, "sweep_tone.wav", l, r, N);
-        make_loop(il, ir, N);
+
+        /* the decay time follows DECAY */
+        if (!gate) {
+            impulse(m, 0.25f, 0.7f, hl, hr, NI);
+            double t0 = rt60(hl + 200, hr + 200, NI - 200), want0 = fx_decay_seconds(m, 0.25f);
+            impulse(m, 0.6f, 0.7f, hl, hr, NI);
+            double t1 = rt60(hl + 200, hr + 200, NI - 200), want1 = fx_decay_seconds(m, 0.6f);
+            snprintf(name, sizeof name, "%s: RT60 at DECAY 0.25 vs set (ratio)", mn);
+            check(t0 / want0 > 0.5 && t0 / want0 < 2.0, name, t0 / want0);
+            snprintf(name, sizeof name, "%s: RT60 at DECAY 0.6 vs set (ratio)", mn);
+            check(t1 / want1 > 0.5 && t1 / want1 < 2.0, name, t1 / want1);
+            snprintf(name, sizeof name, "ir_%s.wav", mn);
+            for (char *c = name; *c; c++) if (*c >= 'A' && *c <= 'Z') *c += 32;
+            wav_write(dir, name, hl, hr, 4 * SR);
+        }
+
+        /* every fader and page-2 control swept on a steady tone: no clicks */
+        {
+            for (int i = 0; i < N; i++) l2[i] = r2[i] = 0.25f * (float)sin(2 * M_PI * 220.0 * i / SR);
+            start(m);
+            memcpy(l, l2, 4 * N); memcpy(r, r2, 4 * N);
+            for (int i = 0; i < N; i += 64) {
+                double t = (double)i / N;
+                double tr_ = t < 0.5 ? 2 * t : 2 - 2 * t;
+                faders((float)tr_, (float)(0.5 + 0.5 * sin(2 * M_PI * 2 * t)), (float)tr_, (float)(1 - tr_));
+                fx_set_param2(&E, FX_MOD_DEPTH, (float)tr_);
+                fx_set_param2(&E, FX_MOD_RATE, (float)tr_);
+                fx_set_param2(&E, FX_PREDELAY, (float)(0.5 - 0.5 * cos(2 * M_PI * t)));
+                fx_set_param2(&E, FX_GRIT, (float)tr_);
+                fx_process(&E, l + i, r + i, 64);
+            }
+            double c = fmax(click_ratio(l, N), click_ratio(r, N));
+            snprintf(name, sizeof name, "%s: sweep every control: no clicks", mn);
+            check(c < 15 && finite_all(l, r, N), name, c);
+        }
     }
 
-    /* ---- 2: filter ---- */
-    {
-        double lo0 = band_db(il, W, N, 40, 150), hi0 = band_db(il, W, N, 3000, 9000);
-        run(il, ir, l, r, N, 1.0f, 0.5f, 0.7f, 1.0f, 256);
-        check(lo0 - band_db(l, W, N, 40, 150) > 20, "filter up: high-pass cuts the lows (dB)", lo0 - band_db(l, W, N, 40, 150));
-        run(il, ir, l, r, N, 1.0f, 0.5f, 0.7f, 0.0f, 256);
-        check(hi0 - band_db(l, W, N, 3000, 9000) > 20, "filter down: low-pass cuts the highs (dB)", hi0 - band_db(l, W, N, 3000, 9000));
-        /* middle fifth is flat (neutral) */
-        run(il, ir, l2, r2, N, 0.0f, 0.5f, 0.7f, 0.5f, 256);
-        run(il, ir, l, r, N, 0.0f, 0.5f, 0.7f, 0.41f, 256);
+    /* ---- model-specific ---- */
+    {   /* longer DECAY, longer reverb */
+        impulse(FX_HALL, 0.2f, 0.7f, hl, hr, NI);
+        double a = rt60(hl + 200, hr + 200, NI - 200);
+        impulse(FX_HALL, 0.6f, 0.7f, hl, hr, NI);
+        double b = rt60(hl + 200, hr + 200, NI - 200);
+        check(b > 2 * a, "HALL: DECAY 0.6 rings longer than 0.2 (s)", b);
+        /* ROOM is shorter than HALL at the same DECAY */
+        impulse(FX_ROOM, 0.6f, 0.7f, hl, hr, NI);
+        double c = rt60(hl + 200, hr + 200, NI - 200);
+        check(c < b / 2, "ROOM: shorter than HALL at the same DECAY (s)", c);
+    }
+    {   /* GATED: dense while the hit lasts, then cut off at the gate time */
+        float dec = 0.4f;
+        double gt = fx_decay_seconds(FX_GATED, dec);
+        int n = 3 * SR;
+        start(FX_GATED); faders(1.0f, dec, 0.7f, 0.5f); fx_set_param2(&E, FX_PREDELAY, 0.0f);
+        memset(hl, 0, 4 * n); memset(hr, 0, 4 * n);
+        unsigned s = 5;
+        for (int i = SR / 2; i < SR / 2 + SR / 20; i++) hl[i] = hr[i] = (float)(0.5 * nz(&s));  /* a 50 ms hit */
+        fx_process(&E, hl, hr, n);
+        int open0 = SR / 2 + SR / 20, closed = open0 + (int)(gt * SR) + SR / 20;
+        double during = rms_db(hl, open0, open0 + (int)(gt * SR * 0.8)), after = rms_db(hl, closed, closed + SR / 4);
+        check(during > -40, "GATED: dense while open (dBFS)", during);
+        check(after - during < -50, "GATED: cut off after the gate time (dB)", after - during);
+        wav_write(dir, "gated_hit.wav", hl, hr, n);
+    }
+    {   /* REVERSE: swells up after a hit, then cuts off */
+        float dec = 0.5f;
+        double len = fx_decay_seconds(FX_REVERSE, dec);
+        int n = 3 * SR, h = SR / 2;
+        start(FX_REVERSE); faders(1.0f, dec, 0.7f, 0.5f); fx_set_param2(&E, FX_PREDELAY, 0.0f);
+        memset(hl, 0, 4 * n); memset(hr, 0, 4 * n);
+        for (int i = h; i < h + 480; i++) hl[i] = hr[i] = 0.5f * (float)sin(2 * M_PI * 300.0 * i / SR);
+        fx_process(&E, hl, hr, n);
+        int L = (int)(len * SR);
+        double first = rms_db(hl, h + L / 10, h + L / 2), second = rms_db(hl, h + L / 2, h + L * 9 / 10);
+        double after = rms_db(hl, h + L + SR / 20, h + L + SR / 4);
+        check(second - first > 6, "REVERSE: louder at the end of the swell than the start (dB)", second - first);
+        check(after - second < -40, "REVERSE: cut off after the swell (dB)", after - second);
+        wav_write(dir, "reverse_hit.wav", hl, hr, n);
+    }
+    {   /* SHIMMER: the octave up builds in the tail; HALL has far less of it */
+        double oct[2]; const int ms[2] = { FX_SHIMMER, FX_HALL };
+        for (int k = 0; k < 2; k++) {
+            int n = 4 * SR;
+            start(ms[k]); faders(1.0f, 0.6f, 0.7f, 0.5f); fx_set_param2(&E, FX_MOD_DEPTH, 0.0f);
+            memset(hl, 0, 4 * n); memset(hr, 0, 4 * n);
+            for (int i = 0; i < SR / 2; i++) hl[i] = hr[i] = 0.3f * (float)sin(2 * M_PI * 440.0 * i / SR);
+            fx_process(&E, hl, hr, n);
+            oct[k] = tone_db(hl, SR, 3 * SR, 880.0) - tone_db(hl, SR, 3 * SR, 440.0);
+            if (!k) wav_write(dir, "shimmer_tone.wav", hl, hr, n);
+        }
+        check(oct[0] > -10, "SHIMMER: the octave (880 Hz) in the tail vs 440 Hz (dB)", oct[0]);
+        check(oct[0] - oct[1] > 15, "SHIMMER: far more octave than HALL (dB)", oct[0] - oct[1]);
+    }
+    {   /* SPRING: dispersion: in the first echo the lows arrive after the highs */
+        impulse(FX_SPRING, 0.3f, 0.7f, hl, hr, SR);
+        double lo = band_centroid(hl, 200, 200 + 1789 + 400, 150, 400);
+        double hi = band_centroid(hl, 200, 200 + 1789 + 400, 3000, 6000);
+        check(lo - hi > 20, "SPRING: lows arrive after highs in an echo (frames)", lo - hi);
+    }
+    {   /* switching models while it plays: no clicks, and the dry never moves */
+        for (int i = 0; i < N; i++) l2[i] = r2[i] = 0.25f * (float)sin(2 * M_PI * 220.0 * i / SR);
+        start(FX_HALL); faders(0.5f, 0.6f, 0.7f, 0.5f);
+        memcpy(l, l2, 4 * N); memcpy(r, r2, 4 * N);
+        for (int i = 0, k = 0; i < N; i += 128) {
+            if (i % (SR / 2) < 128) fx_set_model(&E, (k++) % FX_MODELS);
+            fx_process(&E, l + i, r + i, 128);
+        }
+        double c = fmax(click_ratio(l, N), click_ratio(r, N));
+        check(c < 15, "models: switching every 0.5 s while playing: no clicks", c);
+        wav_write(dir, "model_switching.wav", l, r, N);
+    }
+    {   /* filter: shapes the reverb only */
+        double lo0, hi0;
+        run_m(FX_PLATE, il, ir, l2, r2, N, 1.0f, 0.5f, 0.7f, 0.5f, 256);
+        lo0 = band_db(l2, W, N, 40, 150); hi0 = band_db(l2, W, N, 3000, 9000);
+        run_m(FX_PLATE, il, ir, l, r, N, 1.0f, 0.5f, 0.7f, 1.0f, 256);
+        check(lo0 - band_db(l, W, N, 40, 150) > 20, "filter up: high-pass cuts the reverb's lows (dB)", lo0 - band_db(l, W, N, 40, 150));
+        run_m(FX_PLATE, il, ir, l, r, N, 1.0f, 0.5f, 0.7f, 0.0f, 256);
+        check(hi0 - band_db(l, W, N, 3000, 9000) > 20, "filter down: low-pass cuts the reverb's highs (dB)", hi0 - band_db(l, W, N, 3000, 9000));
+        run_m(FX_PLATE, il, ir, l, r, N, 1.0f, 0.5f, 0.7f, 0.41f, 256);
         int flat = !memcmp(l, l2, 4 * N) && !memcmp(r, r2, 4 * N);
-        run(il, ir, l, r, N, 0.0f, 0.5f, 0.7f, 0.59f, 256);
+        run_m(FX_PLATE, il, ir, l, r, N, 1.0f, 0.5f, 0.7f, 0.59f, 256);
         flat = flat && !memcmp(l, l2, 4 * N) && !memcmp(r, r2, 4 * N);
         check(flat, "filter: flat anywhere in the middle fifth (0.41 and 0.59)", flat);
-        wav_write(dir, "filter_sweep.wav", l, r, N);
+        /* and never the dry */
+        run_m(FX_PLATE, il, ir, l, r, N, 0.0f, 0.5f, 0.7f, 0.0f, 256);
+        int dry = 1;
+        for (int i = lat; i < N; i++) if (l[i] != il[i - lat]) { dry = 0; break; }
+        check(dry, "filter: the dry is untouched (MIX at the bottom, filter down)", dry);
+    }
+    {   /* grit: gritty, but a quiet tail is not cut off */
+        impulse(FX_HALL, 0.5f, 0.7f, hl, hr, 4 * SR);
+        double t0 = rms_db(hl, 2 * SR, 4 * SR);
+        start(FX_HALL); faders(1.0f, 0.5f, 0.7f, 0.5f);
+        fx_set_param2(&E, FX_PREDELAY, 0.0f); fx_set_param2(&E, FX_GRIT, 1.0f);
+        memset(hl, 0, 16 * SR); memset(hr, 0, 16 * SR); hl[200] = hr[200] = 0.5f;
+        fx_process(&E, hl, hr, 4 * SR);
+        double t1 = rms_db(hl, 2 * SR, 4 * SR);
+        check(fabs(t1 - t0) < 3, "grit at full: the late tail keeps its level (dB)", t1 - t0);
+    }
+    {   /* pre-delay: the reverb starts that much later */
+        double at[2]; const float pv[2] = { 0.0f, 0.5f };
+        for (int k = 0; k < 2; k++) {
+            start(FX_PLATE); faders(1.0f, 0.4f, 0.7f, 0.5f); fx_set_param2(&E, FX_PREDELAY, pv[k]);
+            float *z = calloc(SR, 4), *zr = calloc(SR, 4);
+            for (int i = 0; i < SR; i += 256) fx_process(&E, z + i, zr + i, SR - i < 256 ? SR - i : 256);   /* settle */
+            memset(z, 0, 4 * SR); memset(zr, 0, 4 * SR); z[0] = zr[0] = 0.5f;
+            fx_process(&E, z, zr, SR);
+            int first = -1;
+            for (int i = 0; i < SR; i++) if (fabsf(z[i]) > 1e-4f) { first = i; break; }
+            at[k] = 1000.0 * first / SR;
+            free(z); free(zr);
+        }
+        check(at[1] - at[0] > 72 && at[1] - at[0] < 78, "pre-delay at the middle: the reverb starts 75 ms later (ms)", at[1] - at[0]);
     }
 
-    /* ---- 3: reverb tail down check ---- */
-    {
-        float *zl = calloc(N, 4), *zr = calloc(N, 4);
-        fx_init(&E, SR);
-        zl[100] = zr[100] = 0.5f;
-        fx_set_fader(&E, FX_MIX, 0.0f);
-        fx_process(&E, zl, zr, SR / 4);
-        double tail = rms_db(zl, 1000, SR / 4);
-        check(tail < -60.0, "reverb: no old tail after the fader went down and up (dB)", tail);
-        free(zl); free(zr);
+    if (argc > 7) {
+        float *wl, *wr;
+        int n = wav_read(argv[2], &wl, &wr);
+        if (n <= 0) { fprintf(stderr, "can't read %s\n", argv[2]); return 1; }
+        start(atoi(argv[3]));
+        faders((float)atof(argv[4]), (float)atof(argv[5]), (float)atof(argv[6]), (float)atof(argv[7]));
+        for (int i = 0; i < n; i += 256) fx_process(&E, wl + i, wr + i, n - i < 256 ? n - i : 256);
+        wav_write(dir, "yours.wav", wl, wr, n);
+        printf("wrote %s/yours.wav\n", dir);
     }
 
-    /* ---- 4: limiter ceiling ---- */
-    {
-        for (int i = 0; i < N; i++) { il[i] *= 1.9f; ir[i] *= 1.9f; }
-        run(il, ir, l, r, N, 0.7f, 0.5f, 0.7f, 0.5f, 256);
-        double p0 = peak(l, r, N);
-        run(il, ir, l, r, N, 1.0f, 0.9f, 0.7f, 0.5f, 256);
-        double p1 = peak(l, r, N);
-        check(p0 <= 0.9661 && p1 <= 0.9661, "limiter: peak at 0 and +12 dB drive", p1);
-    }
-
-    printf("%s: %d failed\n", fails ? "PASS" : "FAIL", fails);
+    printf("%s: %d failed\n", fails ? "FAIL" : "PASS", fails);
     return fails != 0;
 }

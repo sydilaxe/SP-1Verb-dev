@@ -1,22 +1,28 @@
-/* SP-1FX: a four-effect processor for the Teenage Engineering SP-1.
+/* SP-1 Reverb: a reverb for the Teenage Engineering SP-1, eight models.
  *
  * Audio in:  USB-C, class compliant (UAC2), 48 kHz / 24-bit stereo, from a computer or phone.
  * Audio out: headphones (CS42L42) or, with nothing plugged in, the speaker (TAS2505), 24-bit.
- * In between, fx/fx.c: one effect per fader (DUB, FILTER, REVERB, LIMITER).
+ * In between, fx/fx.c at 48 kHz: the reverb, its mix, then a safety ceiling.
  *
  * Controls
- *   faders 1-4        the four effects (see fx/fx.h)
- *   TRACK 1-4         that effect off/on (it glides to rest and back to its fader)
- *   PLAY              bypass on/off (the effects glide to rest; the limiter stays as a guard)
+ *   faders 1-4        page 1: MIX, DECAY, DIFFUSION, FILTER (the reverb's tone)
+ *                     page 2: MOD DEPTH, MOD RATE, PRE-DELAY, GRIT
+ *   FWD (>>) / RWD (<<)  page 2 / page 1. After a page change a parameter keeps its value until
+ *                     its fader reaches it (pick-up), so nothing jumps.
+ *   TRACK 1-4         the model: TRACK n picks model n (HALL, PLATE, ROOM, SPRING); the same
+ *                     button again flips to model n + 4 (CLOUD, SHIMMER, GATED, REVERSE) and back
+ *   PLAY              bypass on/off (the reverb glides out and back; the safety ceiling stays)
  *   VOL + / VOL -     output volume, 3 dB steps
  *   FUNCTION, hold    power on (1.5 s) / power off (2.5 s)
  *   TRACK 1 + 4, hold 3 s: reset into the bootloader for flashing
  *
  * Lights
- *   track lights      how far each effect is in (filter: distance from the centre); a faint
- *                     glow when that effect is switched off
- *   status lights     limiter gain reduction (0.5, 2, 4, 8 dB); volume for a second after a change;
- *                     all four slowly breathing = bypass
+ *   track lights      page 1: each fader (FILTER: distance from the centre). Page 2: each
+ *                     second parameter. Blinking until a fader picks up. For 1.2 s after a model
+ *                     change: the model's light, steady for models 1-4, blinking for 5-8
+ *   status lights     the safety ceiling's gain reduction (0.5, 2, 4, 8 dB), the fourth
+ *                     blinking on page 2; volume for a second after a change; the page for 0.6 s
+ *                     after a change (1+2 = page 1, 3+4 = page 2); all four breathing = bypass
  *
  * The platform code (power, codecs, I2S clocking, the USB audio class and its feedback, the
  * bootloader rules) follows chattock/sp1-tape-looper (MIT, see LICENSE-sp1-tape-looper), which
@@ -398,7 +404,7 @@ static void hp_codec_init(void)
 /* -------------------------------------------------------------- USB audio ----
  * The host streams 48 kHz / 24-bit stereo into a ring; the audio thread drains it. The ring's
  * fill steers the explicit feedback, so the host sends at the rate the I2S bus really runs. */
-#define USB_FRAME_BYTES 4u
+#define USB_FRAME_BYTES 6u
 #define USB_RING_FRAMES 1024u
 #define FB_SETPOINT     256   /* ~5.3 ms of input held back against USB jitter */
 RING_BUF_DECLARE(usb_ring, USB_RING_FRAMES * USB_FRAME_BYTES);
@@ -525,17 +531,19 @@ static void usb_audio_start(void)
  * 48 kHz). 24-bit samples, one per 32-bit word, sign-extended. Blocks of 128 frames = 2.67 ms. */
 #define BLK_FRAMES 128
 #define BLK_BYTES  (BLK_FRAMES * 2 * (int)sizeof(int32_t))
-K_MEM_SLAB_DEFINE(tx_slab, BLK_BYTES, 8, 4);
+K_MEM_SLAB_DEFINE(tx_slab, BLK_BYTES, 4, 4);
 static const struct device *const i2s_dev = DEVICE_DT_GET(DT_NODELABEL(i2s0));
 static K_THREAD_STACK_DEFINE(audio_stack, 4096);
 static struct k_thread audio_tcb;
 static volatile bool g_audio_started;
 static int g_i2s_rc = 1;
 
-static fx_engine g_fx;                       /* ~104 KB, mostly the reverb */
-static volatile float g_fader[4] = { 0.0f, 0.5f, 0.0f, 0.0f };
+static fx_engine g_fx;                       /* a few KB of state */
+static volatile float g_fader[4] = { 0.0f, 0.5f, 0.7f, 0.5f };   /* as fx_init sets them */
+static volatile float g_param2[4] = { 0.25f, 0.4f, 0.1f, 0.0f };
+static volatile int g_page;                  /* 0: Main amounts, 1: Secondary parameters */
 static volatile bool g_bypass;
-static volatile bool g_fx_off[4];            /* track buttons switch each effect off and on */
+static volatile int g_model;                 /* FX_HALL .. FX_REVERSE, picked with the track buttons */
 static volatile int g_vol_db = -6;           /* output volume, 3 dB steps, -60..0 */
 static volatile bool g_muted;                /* power-off fade */
 static float g_vol_lin;
@@ -558,32 +566,68 @@ static inline int32_t to_s24(float x)
 static void audio_block(int32_t *out)
 {
 	uint32_t got = 0;
+	static int underflow_count = 0;
 	if (g_usb_streaming) {
 		uint32_t fill = ring_buf_size_get(&usb_ring) / USB_FRAME_BYTES;
-		if (!g_primed && fill >= FB_SETPOINT) g_primed = true;
+		if (!g_primed && fill >= FB_SETPOINT) {
+			g_primed = true;
+			underflow_count = 0;
+		}
 		if (g_primed) {
 			got = ring_buf_get(&usb_ring, g_in, sizeof(g_in)) / USB_FRAME_BYTES;
-			if (got < BLK_FRAMES) { g_ring_under++; g_primed = false; }
+			if (got < BLK_FRAMES) {
+				g_ring_under++;
+				if (got == 0) {
+					if (++underflow_count >= 4) {
+						g_primed = false;
+					}
+				} else {
+					underflow_count = 0;
+				}
+			} else {
+				underflow_count = 0;
+			}
 		}
 	} else {
 		g_primed = false;
+		underflow_count = 0;
 	}
-	for (uint32_t i = 0; i < got; i++) {
-		const int16_t *p = (const int16_t *)&g_in[i * 4];
-		bufl[i] = (float)p[0] * (1.0f / 32768.0f);
-		bufr[i] = (float)p[1] * (1.0f / 32768.0f);
-	}
-	if (got < BLK_FRAMES) g_zero_pad += BLK_FRAMES - got;
-	for (uint32_t i = got; i < BLK_FRAMES; i++) bufl[i] = bufr[i] = 0.0f;
 
-	if (g_bypass) {
-		fx_set_fader(&g_fx, FX_DUB, 0.0f);
-		fx_set_fader(&g_fx, FX_FILTER, 0.5f);
-		fx_set_fader(&g_fx, FX_REVERB, 0.0f);
-		fx_set_fader(&g_fx, FX_LIMITER, 0.0f);
-	} else {
-		static const float rest[4] = { 0.0f, 0.5f, 0.0f, 0.0f };
-		for (int k = 0; k < 4; k++) fx_set_fader(&g_fx, k, g_fx_off[k] ? rest[k] : g_fader[k]);
+	for (uint32_t i = 0; i < got; i++) {
+		const uint8_t *p = &g_in[i * 6];
+		int32_t l = (int32_t)(((uint32_t)p[0] << 8) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 24)) >> 8;
+		int32_t r = (int32_t)(((uint32_t)p[3] << 8) | ((uint32_t)p[4] << 16) | ((uint32_t)p[5] << 24)) >> 8;
+		bufl[i] = (float)l * (1.0f / 8388608.0f);
+		bufr[i] = (float)r * (1.0f / 8388608.0f);
+	}
+	if (got < BLK_FRAMES) {
+		g_zero_pad += BLK_FRAMES - got;
+		float last_l = got > 0 ? bufl[got - 1] : 0.0f;
+		float last_r = got > 0 ? bufr[got - 1] : 0.0f;
+		for (uint32_t i = got; i < BLK_FRAMES; i++) {
+			last_l *= 0.95f;
+			last_r *= 0.95f;
+			bufl[i] = last_l;
+			bufr[i] = last_r;
+		}
+	}
+
+	/* bypass takes MIX to the bottom through the engine, so the reverb glides out and back; the
+	 * dry then passes exactly (only delayed), and the latency never changes, so it never clicks */
+	static float last_f[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
+	static float last_p2[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
+	fx_set_model(&g_fx, g_model);   /* the engine fades the old model out and the new one in */
+	for (int k = 0; k < 4; k++) {
+		float f = (g_bypass && k == FX_MIX) ? 0.0f : g_fader[k];
+		if (f != last_f[k]) {
+			fx_set_fader(&g_fx, k, f);
+			last_f[k] = f;
+		}
+		float p2 = g_param2[k];
+		if (p2 != last_p2[k]) {
+			fx_set_param2(&g_fx, k, p2);
+			last_p2[k] = p2;
+		}
 	}
 	fx_process(&g_fx, bufl, bufr, BLK_FRAMES);
 
@@ -635,6 +679,7 @@ static void audio_thread(void *a, void *b, void *c)
 		g_blk_us_last = us;
 		if (us > g_blk_us_max) g_blk_us_max = us;
 		if (us > 2666u) g_blk_over++;
+		k_yield();
 		if (i2s_write(i2s_dev, blk, BLK_BYTES) != 0) {
 			g_i2s_fail++;
 			k_mem_slab_free(&tx_slab, blk);
@@ -733,13 +778,13 @@ static void status_line(void)
 {
 	if (!cdc_open()) return;
 	uint32_t fill = ring_buf_size_get(&usb_ring) / USB_FRAME_BYTES;
-	printk("SP-1FX f=%d,%d,%d,%d byp=%d vol=%d usb=%d fill=%u under=%u over=%u nobuf=%u pad=%u "
+	printk("SP-1Verb model=%d f=%d,%d,%d,%d byp=%d vol=%d usb=%d fill=%u under=%u over=%u nobuf=%u pad=%u "
 	       "blk=%u/%uus over=%u i2s=%d/%u hp=%d/%d tas=%d gr=%d.%ddB bat=%d rr=%08x flt=%08x@%08x\n",
-	       g_adc[2], g_adc[3], g_adc[4], g_adc[5], g_bypass, g_vol_db, g_usb_streaming, fill,
+	       g_model, g_adc[2], g_adc[3], g_adc[4], g_adc[5], g_bypass, g_vol_db, g_usb_streaming, fill,
 	       g_ring_under, g_ring_over, g_rx_nobuf, g_zero_pad, g_blk_us_last, g_blk_us_max,
 	       g_blk_over, g_i2s_rc, g_i2s_fail, g_hp_on, g_hp_in, g_tas_ok,
-	       (int)(-fx_lin2db(1.0f - g_fx.limiter.meter + 1e-6f)),
-	       (int)(-fx_lin2db(1.0f - g_fx.limiter.meter + 1e-6f) * 10.0f) % 10,
+	       (int)fx_gain_reduction_db(&g_fx),
+	       (int)(fx_gain_reduction_db(&g_fx) * 10.0f) % 10,
 	       g_adc[CH_BATT], g_resetreas, g_last_fault, g_last_fault_pc);
 	g_blk_us_max = 0;
 }
@@ -835,8 +880,14 @@ int main(void)
 	k_msleep(120);
 	leds_off();
 
-	float fpos[4] = { 0.0f, 0.5f, 0.0f, 0.0f };
-	int64_t pwr_t = -1, dfu_t = -1, vol_show_until = 0, hp_next = 0, stat_next = 0;
+	float fpos[4] = { 0.0f, 0.5f, 0.7f, 0.5f };
+	int64_t model_show_until = 0;
+	/* pick-up: after a page change a fader only takes over its parameter once it reaches the
+	 * value (or passes it); until then the parameter stays put. side[] is which side of the value
+	 * the fader started on. */
+	bool caught[4] = { true, true, true, true };
+	int side[4] = { 0, 0, 0, 0 };
+	int64_t pwr_t = -1, dfu_t = -1, vol_show_until = 0, page_show_until = 0, hp_next = 0, stat_next = 0;
 	int last_vol = VOL_NONE, hp_votes = 0, play_n = 0, trk_cand = -1, trk_n = 0, odd_n = 0;
 	bool play_armed = false, chord = false;
 	uint32_t tick = 0;
@@ -853,7 +904,15 @@ int main(void)
 				float p = (float)g_adc[CH_FADER0 + k] / FADER_TOP;
 				p = p < 0.0f ? 0.0f : p > 1.0f ? 1.0f : p;
 				fpos[k] = first ? p : fpos[k] + 0.35f * (p - fpos[k]);
-				g_fader[k] = fpos[k];
+				volatile float *dst = g_page == 0 ? &g_fader[k] : &g_param2[k];
+				if (!caught[k]) {
+					float d = fpos[k] - *dst;
+					int sd = d < 0.0f ? -1 : 1;
+					if (d < 0.03f && d > -0.03f) caught[k] = true;
+					else if (side[k] == 0) side[k] = sd;
+					else if (sd != side[k]) caught[k] = true;   /* swept past it */
+				}
+				if (caught[k]) *dst = fpos[k];
 			}
 			first = false;
 
@@ -875,7 +934,13 @@ int main(void)
 			if (tv < 110) {
 				if (!chord) {
 					if (play_armed) g_bypass = !g_bypass;
-					else if (trk_cand >= 0 && trk_n >= 2) g_fx_off[trk_cand] = !g_fx_off[trk_cand];
+					else if (trk_cand >= 0 && trk_n >= 2) {
+						/* TRACK n: model n; again: model n + 4, and back */
+						int m = trk_cand;
+						if (g_model == m) m += 4;
+						g_model = m;
+						model_show_until = now + 1200;
+					}
 				}
 				play_armed = false; trk_cand = -1; trk_n = 0; play_n = 0; odd_n = 0; chord = false;
 			} else if (is_play(tv)) {
@@ -897,6 +962,12 @@ int main(void)
 				if (vol == VOL_UP && g_vol_db < 0) g_vol_db += 3;
 				if (vol == VOL_DOWN && g_vol_db > -60) g_vol_db -= 3;
 				if (vol == VOL_UP || vol == VOL_DOWN) vol_show_until = now + 1000;
+				int np = vol == VOL_FWD ? 1 : vol == VOL_RWD ? 0 : g_page;
+				if (vol == VOL_FWD || vol == VOL_RWD) page_show_until = now + 600;
+				if (np != g_page) {
+					g_page = np;
+					for (int k = 0; k < 4; k++) { caught[k] = false; side[k] = 0; }
+				}
 			}
 			last_vol = vol;
 		}
@@ -909,29 +980,6 @@ int main(void)
 			pwr_t = -1;
 		}
 
-		/* Feedback probe: adapt to Apple (3-byte Q10.14) vs Windows (4-byte Q16.16) */
-		{
-			static int64_t fb_probe_t;
-			static uint32_t fb_zp_last;
-			static int fb_starve_streak;
-			if (fb_probe_t == 0) {
-				fb_probe_t = now;
-				fb_zp_last = g_zero_pad;
-			} else if (now - fb_probe_t >= 100) {
-				fb_probe_t = now;
-				uint32_t zpn = g_zero_pad;
-				uint32_t d = zpn - fb_zp_last;
-				fb_zp_last = zpn;
-				if (d >= 2400u) {
-					if (++fb_starve_streak >= 4) {
-						uac2_fs_fb_windows_fmt = !uac2_fs_fb_windows_fmt;
-						fb_starve_streak = 0;
-					}
-				} else {
-					fb_starve_streak = 0;
-				}
-			}
-		}
 		/* headphones in: speaker off */
 		if (g_hp_on && now >= hp_next) {
 			hp_next = now + 250;
@@ -952,20 +1000,54 @@ int main(void)
 			int b = (int)((tick % 100u) < 50u ? (tick % 50u) : 50u - (tick % 50u)) * 3;
 			for (int i = 0; i < 4; i++) { led_set(g_sta_duty, i, b); led_set(g_trk_duty, i, 0); }
 		} else {
-			/* the filter's light: dark across its flat middle (0.4..0.6), then up to either end */
-			float fd = fpos[1] < 0.5f ? 0.5f - fpos[1] : fpos[1] - 0.5f;
-			fd = fd < 0.1f ? 0.0f : (fd - 0.1f) / 0.4f;
-			float amt[4] = { fpos[0], fd, fpos[2], fpos[3] };
-			for (int i = 0; i < 4; i++)
-				led_set(g_trk_duty, i, g_fx_off[i] ? 6 : (int)(amt[i] * amt[i] * LED_DIM));
-			if (now < vol_show_until) {
+			if (g_page == 0) {
+				/* page 1: the filter's light is dark across its flat middle (0.4..0.6) */
+				float f4 = g_fader[3];
+				float fd = f4 < 0.5f ? 0.5f - f4 : f4 - 0.5f;
+				fd = fd < 0.1f ? 0.0f : (fd - 0.1f) / 0.4f;
+				float amt[4] = { g_fader[0], g_fader[1], g_fader[2], fd };
+				for (int i = 0; i < 4; i++) {
+					int v = 4 + (int)(amt[i] * amt[i] * LED_DIM);
+					if (!caught[i] && tick % 30u < 10u) v = 0;   /* waiting for pick-up */
+					led_set(g_trk_duty, i, v);
+				}
+			} else {
+				/* page 2: each second parameter */
+				for (int i = 0; i < 4; i++) {
+					int v = 4 + (int)(g_param2[i] * g_param2[i] * LED_DIM);
+					if (!caught[i] && tick % 30u < 10u) v = 0;   /* waiting for pick-up */
+					led_set(g_trk_duty, i, v);
+				}
+			}
+			if (now < model_show_until) {
+				/* the model: its light, steady for 1-4, blinking for 5-8 */
+				int on = g_model < 4 || tick % 20u < 10u;
+				for (int i = 0; i < 4; i++) led_set(g_trk_duty, i, (i == g_model % 4 && on) ? LED_DIM : 0);
+			}
+
+			if (now < page_show_until) {
+				/* Page transition animation */
+				if (g_page == 1) {
+					led_set(g_sta_duty, 0, 0); led_set(g_sta_duty, 1, 0);
+					led_set(g_sta_duty, 2, LED_DIM); led_set(g_sta_duty, 3, LED_DIM);
+				} else {
+					led_set(g_sta_duty, 0, LED_DIM); led_set(g_sta_duty, 1, LED_DIM);
+					led_set(g_sta_duty, 2, 0); led_set(g_sta_duty, 3, 0);
+				}
+			} else if (now < vol_show_until) {
 				int lv = (g_vol_db + 60) * 4 / 60;   /* 0..4 */
 				for (int i = 0; i < 4; i++) led_set(g_sta_duty, i, i < lv ? LED_DIM : 0);
 			} else {
-				float gr = -fx_lin2db(1.0f - g_fx.limiter.meter + 1e-6f);
+				float gr = fx_gain_reduction_db(&g_fx);
 				static const float thr[4] = { 0.5f, 2.0f, 4.0f, 8.0f };
-				for (int i = 0; i < 4; i++) led_set(g_sta_duty, i, gr >= thr[i] ? LED_DIM : 0);
-				g_fx.limiter.meter *= 0.85f;   /* the meter falls back between readings */
+				for (int i = 0; i < 4; i++) {
+					int on = gr >= thr[i] ? LED_DIM : 0;
+					if (g_page == 1 && i == 3 && on == 0) {
+						on = (tick % 40u < 20u) ? 40 : 0;
+					}
+					led_set(g_sta_duty, i, on);
+				}
+				g_fx.meter *= 0.85f;   /* the meter falls back between readings */
 			}
 		}
 

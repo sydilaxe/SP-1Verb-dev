@@ -70,14 +70,16 @@ jobs:
           # and it fits: RAM used, from the build
           grep -q "CONFIG_BOARD_STEM_PLAYER=y" sp-1verb/build/firmware/zephyr/.config
 
-      - name: CPU estimate (Cortex-M4, every effect fully in)
+      - name: CPU estimate (Cortex-M4 at 48 kHz, every model, everything on)
         run: |
           pip install unicorn capstone
-          ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk-0.17.4 python3 sp-1verb/tools/bench_m4.py -v | tee bench.txt
-          # one core is 100%; keep the worst case clear of it
-          pct=$(sed -n 's/.*: \([0-9]*\)% of one core.*/\1/p' bench.txt)
-          echo "worst case: $pct% of one core"
-          test -n "$pct" && test "$pct" -le 80
+          # one core is 100%; keep every model's worst case clear of it
+          for m in 0 1 2 3 4 5 6 7; do
+            BENCH_MODEL=$m ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk-0.17.4 python3 sp-1verb/tools/bench_m4.py | tee bench.txt
+            pct=$(sed -n 's/.*: \([0-9]*\)% of one core.*/\1/p' bench.txt)
+            echo "model $m worst case: $pct% of one core"
+            test -n "$pct" && test "$pct" -le 80
+          done
 
       - uses: actions/upload-artifact@v4
         with:
@@ -100,13 +102,15 @@ jobs:
           r=build/test/results.txt
           grep -q "^PASS: 0 failed" $r
           # the sound's promises
-          grep -q "^blocks of 256 and of 1..300: same output .* ok" $r
-          grep -q "^rest: noise and aliasing on a -6 dBFS 1 kHz tone .* ok" $r
-          grep -q "^rest: a 15 kHz tone is gone, no alias .* ok" $r
-          grep -q "^full chain: peak under the -0.3 dBFS ceiling .* ok" $r
-          grep -q "^sweep all faders: no clicks .* ok" $r
+          grep -q "^dry: bit-exact input at the stated latency .* ok" $r
+          grep -q "^dry: an 18 kHz tone passes (full bandwidth) .* ok" $r
+          for m in HALL PLATE ROOM SPRING CLOUD SHIMMER GATED REVERSE; do
+            grep -q "^$m: blocks of 256 and of 1..300, same output .* ok" $r
+            grep -q "^$m: decay full, hot input: peak under -0.3 dBFS .* ok" $r
+            grep -q "^$m: sweep every control: no clicks .* ok" $r
+          done
+          grep -q "^models: switching every 0.5 s while playing: no clicks .* ok" $r
           grep -q "^filter: flat anywhere in the middle fifth .* ok" $r
-          grep -q "^reverb: no old tail after the fader went down and up .* ok" $r
 
       - uses: actions/upload-artifact@v4
         if: always()
