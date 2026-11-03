@@ -262,6 +262,25 @@ static double band_centroid(const float *x, int from, int to, double lo, double 
     return sw / (s + 1e-30);
 }
 
+
+/* how spiky a tail is: in each 40 ms block the loudest 1 ms against the block's average (dB),
+ * averaged over the blocks. A dense tail sits near 5 dB; a train of discrete echoes far higher. */
+static double flutter_db(const float *x, int from, int to)
+{
+    const int w = SR / 1000, B = 40;
+    double acc = 0; int nb = 0;
+    for (int b0 = from; b0 + B * w <= to; b0 += B * w) {
+        double mx = 0, sum = 0;
+        for (int k = 0; k < B; k++) {
+            double e = 0;
+            for (int i = 0; i < w; i++) { double v = x[b0 + k * w + i]; e += v * v; }
+            sum += e; if (e > mx) mx = e;
+        }
+        if (sum > 0) { acc += 10 * log10(mx / (sum / B)); nb++; }
+    }
+    return nb ? acc / nb : 0;
+}
+
 /* amplitude of one frequency (a single DFT bin) */
 static double tone_db(const float *x, int from, int n, double hz)
 {
@@ -444,11 +463,23 @@ int main(int argc, char **argv)
         check(oct[0] > -10, "SHIMMER: the octave (880 Hz) in the tail vs 440 Hz (dB)", oct[0]);
         check(oct[0] - oct[1] > 15, "SHIMMER: far more octave than HALL (dB)", oct[0] - oct[1]);
     }
-    {   /* SPRING: dispersion: in the first echo the lows arrive after the highs */
-        impulse(FX_SPRING, 0.3f, 0.7f, hl, hr, SR);
-        double lo = band_centroid(hl, 200, 200 + 1789 + 400, 150, 400);
-        double hi = band_centroid(hl, 200, 200 + 1789 + 400, 3000, 6000);
-        check(lo - hi > 20, "SPRING: lows arrive after highs in an echo (frames)", lo - hi);
+    {   /* SPRING: dispersion: in the first trip the highs (below 4 kHz) arrive after the lows. The
+         * measuring filters' own delay is taken out, from a plain impulse through the same bands. */
+        impulse(FX_SPRING, 0.3f, 0.0f, hl, hr, SR);
+        int a = 200 + 1789, b = a + 700;
+        double lo = band_centroid(hl, a, b, 300, 600), hi = band_centroid(hl, a, b, 2000, 3500);
+        memset(hr, 0, 4 * SR); hr[a] = 1.0f;
+        lo -= band_centroid(hr, a, b, 300, 600); hi -= band_centroid(hr, a, b, 2000, 3500);
+        check(hi - lo > 20, "SPRING: highs arrive after lows in a trip (frames)", hi - lo);
+    }
+    {   /* SPRING: a smeared tail, not a train of discrete clicks (it was ~16 dB; HALL ~4) */
+        for (int k = 0; k < 2; k++) {
+            float dif = k ? 0.0f : 0.7f;
+            impulse(FX_SPRING, 0.5f, dif, hl, hr, SR);
+            double f = fmax(flutter_db(hl, SR / 10, SR * 7 / 10), flutter_db(hr, SR / 10, SR * 7 / 10));
+            check(f < 8, k ? "SPRING: smooth tail, DIFFUSION at the bottom (dB)" : "SPRING: smooth tail, no echo train (dB)", f);
+            if (!k) wav_write(dir, "spring_impulse.wav", hl, hr, SR);
+        }
     }
     {   /* switching models while it plays: no clicks, and the dry never moves */
         for (int i = 0; i < N; i++) l2[i] = r2[i] = 0.25f * (float)sin(2 * M_PI * 220.0 * i / SR);
