@@ -99,6 +99,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: The README shows the source's version
+        run: |
+          # README's "Latest release" line and FIRMWARE_VERSION in src/firmwareVersion.ts move together
+          v=$(sed -n "s/.*FIRMWARE_VERSION = 'v\\([^']*\\)'.*/\\1/p" src/firmwareVersion.ts)
+          grep -qF "**Latest release:** [v$v](../../releases/tag/v$v)" README.md ||
+            { echo "::error::README.md's Latest release line isn't v$v, FIRMWARE_VERSION in src/firmwareVersion.ts"; exit 1; }
 
       - name: Build and run the checks
         run: |

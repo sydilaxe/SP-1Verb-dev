@@ -3,6 +3,7 @@ import { reverbEngine, ReverbParams, DEFAULT_PARAMS, StemState, UsbAudioConfig }
 import { PRESETS, ReverbPreset } from './audio/presets';
 import { TouchLightStrip } from './components/TouchLightStrip';
 import { BinaryBuilderModal } from './components/BinaryBuilderModal';
+import { FIRMWARE_VERSION } from './firmwareVersion';
 import { 
   Play, 
   Square, 
@@ -270,7 +271,7 @@ export default function App() {
           <button
             onClick={() => setShowBinaryModal(true)}
             className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-bold bg-[#ff5722] text-zinc-950 hover:bg-[#ff7a50] shadow-sm transition-all active:scale-95"
-            title="Download sp1_verb.bin for solderless.engineering"
+            title={`Download sp1verb.bin ${FIRMWARE_VERSION} for solderless.engineering`}
           >
             <Download className="w-3 h-3" />
             <span>BUILD .BIN</span>
