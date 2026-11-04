@@ -22,12 +22,32 @@
  *   fader 3  DIFFUSION  scattered echoes (bottom) to a dense cloud (top)
  *   fader 4  FILTER     the reverb's tone: the middle fifth is flat; down sweeps a low-pass down,
  *                       up sweeps a high-pass up. The dry signal is never filtered.
- * Page 2 (FWD in the firmware):
- *   fader 1  MOD DEPTH  chorusing of the tank's delay lines
- *   fader 2  MOD RATE   0.2 to 4.5 Hz
- *   fader 3  PRE-DELAY  0 to 150 ms before the reverb starts
- *   fader 4  GRIT       early-digital converter: fewer bits (down to 6) on the reverb, following
- *                       its level so quiet tails are gritty too rather than cut off
+ * Page 2 (FWD in the firmware): the model's own four controls, one model's at a time. Each model
+ * keeps its own settings; fader 3 is PRE-DELAY on every model. At their defaults each model
+ * sounds as it did with no page 2 at all.
+ *            fader 1     fader 2     fader 3     fader 4
+ *   HALL     MOD DEPTH   MOD RATE    PRE-DELAY   DAMPING
+ *   PLATE    DENSITY     DAMPING     PRE-DELAY   GRIT
+ *   ROOM     DENSITY     DAMPING     PRE-DELAY   GRIT
+ *   SPRING   DRIVE       CRASH       PRE-DELAY   WOBBLE
+ *   CLOUD    MOD DEPTH   MOD RATE    PRE-DELAY   DAMPING
+ *   SHIMMER  OCTAVE      MOD DEPTH   PRE-DELAY   DAMPING
+ *   GATED    THRESHOLD   RELEASE     PRE-DELAY   GRIT
+ *   REVERSE  CURVE       THRESHOLD   PRE-DELAY   DAMPING
+ * What they do:
+ *   MOD DEPTH  chorusing of the tank's delay lines       MOD RATE   0.2 to 4.5 Hz
+ *   PRE-DELAY  0 to 150 ms before the reverb starts
+ *   DAMPING    the tail's top: the middle is the model's own, down darker, up brighter
+ *   DENSITY    the tank's and the input's diffusion: the middle is the model's own
+ *   GRIT       early-digital converter: fewer bits (down to 6) on the reverb, following its
+ *              level so quiet tails are gritty too rather than cut off
+ *   DRIVE      the spring's tube driver: clean at the bottom, squashed at the top
+ *   CRASH      how hard the springs rattle on a hard hit: none at the bottom
+ *   WOBBLE     the springs' slow pitch wobble
+ *   OCTAVE     how much octave goes back into the tank: none (a plain hall) to full
+ *   THRESHOLD  the input level that opens the gate (or starts the swell): -60 to -20 dBFS
+ *   RELEASE    how fast the gate closes: 1 to 64 ms
+ *   CURVE      the swell's shape: a straight line, a square (the middle), a cube
  *
  * After the mix, an always-on safety ceiling (-1 dBFS, 1 ms look-ahead) that only acts on overs.
  *
@@ -47,7 +67,9 @@
 #define FX_CHUNK 32   /* frames (48 kHz) between parameter updates: 0.67 ms */
 
 enum { FX_MIX, FX_DECAY, FX_DIFFUSION, FX_FILTER };                  /* page 1 */
-enum { FX_MOD_DEPTH, FX_MOD_RATE, FX_PREDELAY, FX_GRIT };             /* page 2 */
+/* page 2: the controls a model can have; fx_param2_id() says which are on a model's faders */
+enum { FX_P_DEPTH, FX_P_RATE, FX_P_PREDELAY, FX_P_DAMPING, FX_P_DENSITY, FX_P_GRIT, FX_P_DRIVE,
+       FX_P_CRASH, FX_P_WOBBLE, FX_P_OCTAVE, FX_P_THRESHOLD, FX_P_RELEASE, FX_P_CURVE, FX_P_N };
 enum { FX_HALL, FX_PLATE, FX_ROOM, FX_SPRING, FX_CLOUD, FX_SHIMMER, FX_GATED, FX_REVERSE, FX_MODELS };
 
 /* delay line lengths at 48 kHz (frames) */
@@ -74,7 +96,8 @@ typedef struct {
     float sr;
     int phase;                       /* frames into the current chunk */
     float fader[FX_SLOTS];           /* page 1 positions, 0..1 */
-    float param2[FX_SLOTS];          /* page 2 positions, 0..1 */
+    float param2[FX_MODELS][FX_SLOTS]; /* page 2 positions, 0..1: each model's own */
+    float pv[FX_P_N];                /* the playing model's page 2, by control, smoothed */
 
     /* smoothed controls */
     float mix, decay, diffusion, depth, predelay, grit;
@@ -87,7 +110,7 @@ typedef struct {
     float swg;                       /* the switch fade: 1 playing, 0 swapped out */
     float in_g, in_t, in_step;       /* the reverb's input, faded in after a switch */
     int n_ap[4], n_tap1, n_tap2, n_d2, n_d4, n_tap1x, n_tap2x;
-    float size, tank_c, depth_scale;
+    float size, tank_c, tank_b, depth_scale;   /* tank_b: tank_c before DENSITY */
     /* a switch that keeps the tail: each of the tank's six lengths (two allpasses, four delays)
      * crossfades in turn to its new value (nx_*), xg its weight, xs its step per frame; xp the
      * whole switch's progress, as the loop's gain and coefficients glide from the old model's (o_*) */
@@ -100,6 +123,7 @@ typedef struct {
     /* GATED / REVERSE: an envelope on the reverb, keyed by the input */
     float k_det, k_slow, k_env, k_att, k_rel, k_rel_s, k_close;
     int k_t, k_len, k_run;
+    float k_thr, k_curve;            /* THRESHOLD's level; CURVE, 0..2 */
 
     /* SHIMMER */
     float sh_buf[SH_LEN];
@@ -119,6 +143,7 @@ typedef struct {
     float sp_hp[4], sp_hc, sp_oc;   /* the springs' low end: in the loop, and at the pickup */
     float sp_a;                     /* the dispersion's strength (DIFFUSION) */
     float sp_fast, sp_slow, sp_crash; /* a hard hit rattles the springs: the crash */
+    float sp_drive, sp_crash_g;     /* DRIVE and CRASH */
     uint32_t sp_rng;
     float sp_k[4];
 
@@ -155,7 +180,11 @@ typedef struct {
 
 void fx_init(fx_engine *e, float sr);
 void fx_set_fader(fx_engine *e, int slot, float pos);     /* page 1, 0..1 */
-void fx_set_param2(fx_engine *e, int slot, float pos);    /* page 2, 0..1 */
+void fx_set_param2(fx_engine *e, int model, int slot, float pos);  /* that model's page 2, 0..1 */
+int fx_param2_id(int model, int slot);                    /* which control (FX_P_*) is on that fader */
+int fx_param2_slot(int model, int id);                    /* and back: the fader, or -1 if none */
+float fx_param2_default(int model, int slot);
+const char *fx_param2_name(int model, int slot);
 void fx_set_model(fx_engine *e, int model);               /* FX_HALL .. FX_REVERSE */
 const char *fx_model_name(int model);
 void fx_process(fx_engine *e, float *l, float *r, int n); /* in place */

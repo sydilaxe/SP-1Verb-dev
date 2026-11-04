@@ -42,16 +42,47 @@ between the tank models keeps the tail without a click.
 
 ## The faders
 
-Two pages of four. **FWD (>>)** goes to page 2, **RWD (<<)** back to page 1. After a page change
-a parameter keeps its value until its fader reaches it (or sweeps past it), so nothing jumps; its
-track light blinks until then.
+Two pages of four, switched with the side rocker: **FWD (>>)** goes to page 2, **RWD (<<)** back
+to page 1. Page 1 is shared by every model; page 2 is the playing model's own four controls, and
+each model remembers its own. After a page change (or a model change on page 2) a parameter keeps
+its value until its fader reaches it (or sweeps past it), so nothing jumps; its track light blinks
+until then.
 
-| Fader | Page 1 | Page 2 |
-|---|---|---|
-| 1 | **Mix**: dry at the bottom, all reverb at the top (constant power) | **Mod depth**: chorusing of the tank |
-| 2 | **Decay**: the model's reverb time (see above); the tail darkens as it lengthens | **Mod rate**: 0.2 to 4.5 Hz |
-| 3 | **Diffusion**: scattered echoes at the bottom, a dense cloud at the top | **Pre-delay**: 0 to 150 ms before the reverb starts |
-| 4 | **Filter**: the reverb's tone. The middle fifth is flat; down sweeps a low-pass down to 200 Hz, up a high-pass up to 4 kHz. The dry is never filtered | **Grit**: an early-digital converter, down to 6 bits on the reverb. The bit steps follow the reverb's level, so quiet tails get gritty too instead of cutting off |
+| Fader | Page 1 (every model) |
+|---|---|
+| 1 | **Mix**: dry at the bottom, all reverb at the top (constant power) |
+| 2 | **Decay**: the model's reverb time (see above); the tail darkens as it lengthens |
+| 3 | **Diffusion**: scattered echoes at the bottom, a dense cloud at the top |
+| 4 | **Filter**: the reverb's tone. The middle fifth is flat; down sweeps a low-pass down to 200 Hz, up a high-pass up to 4 kHz. The dry is never filtered |
+
+Page 2, per model (fader 3 is always Pre-delay):
+
+| Model | Fader 1 | Fader 2 | Fader 3 | Fader 4 |
+|---|---|---|---|---|
+| Hall | Mod depth | Mod rate | Pre-delay | Damping |
+| Plate | Density | Damping | Pre-delay | Grit |
+| Room | Density | Damping | Pre-delay | Grit |
+| Spring | Drive | Crash | Pre-delay | Wobble |
+| Cloud | Mod depth | Mod rate | Pre-delay | Damping |
+| Shimmer | Octave | Mod depth | Pre-delay | Damping |
+| Gated | Threshold | Release | Pre-delay | Grit |
+| Reverse | Curve | Threshold | Pre-delay | Damping |
+
+- **Mod depth / Mod rate**: chorusing of the tank, 0.2 to 4.5 Hz.
+- **Pre-delay**: 0 to 150 ms before the reverb starts.
+- **Damping**: the tail's top; the middle is the model's own, down darker, up brighter.
+- **Density**: how fast the echoes smear into a tail; the middle is the model's own.
+- **Grit**: an early-digital converter, down to 6 bits on the reverb. The bit steps follow the
+  reverb's level, so quiet tails get gritty too instead of cutting off.
+- **Drive** (Spring): the tube driver, clean to squashed. **Crash**: the rattle on a hard hit, none
+  to double. **Wobble**: the springs' slow pitch wobble.
+- **Octave** (Shimmer): how much octave goes back into the tank, none (a plain hall) to full.
+- **Threshold** (Gated, Reverse): the input level that opens the gate or starts the swell, -60 to
+  -20 dBFS. **Release** (Gated): how fast the gate closes, 1 to 64 ms. **Curve** (Reverse): the
+  swell's shape, a straight ramp, a square or a cube.
+
+At their starting positions the page 2 controls leave each model sounding exactly as before; a
+control a model doesn't have stays there (Hall has no Grit, so it is off).
 
 After the mix, a **safety ceiling** at -1 dBFS (1 ms look-ahead) is always on and only acts on
 overs.
@@ -100,7 +131,7 @@ readings, `usb=` streaming, `fill=` the input buffer, `under= over=` buffer unde
 ## CPU and memory
 
 - RAM: about 162 KB of 256 KB, mostly the reverb's delay lines.
-- CPU, worst case (any model, with the filter, grit and modulation all on): about 60% of the
+- CPU, worst case (any model, with the filter and all its page 2 controls at the top): about 60% of the
   64 MHz Cortex-M4, estimated by `tools/bench_m4.py` (`BENCH_MODEL=0..7` picks the model;
   `BENCH_SWITCH=n` measures a switch to model n, which costs no more). The real figure is the
   status line's `blk=`.

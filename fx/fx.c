@@ -118,14 +118,75 @@ float fx_decay_seconds(int model, float pos)
     return m->rt_lo * fx_exp2f(fx_log2f(m->rt_hi / m->rt_lo) * pos);
 }
 
+/* ------------------------------------------------------------------- page 2 ---- */
+
+static const signed char PAGE2[FX_MODELS][FX_SLOTS] = {
+    { FX_P_DEPTH,     FX_P_RATE,      FX_P_PREDELAY, FX_P_DAMPING },   /* HALL */
+    { FX_P_DENSITY,   FX_P_DAMPING,   FX_P_PREDELAY, FX_P_GRIT },      /* PLATE */
+    { FX_P_DENSITY,   FX_P_DAMPING,   FX_P_PREDELAY, FX_P_GRIT },      /* ROOM */
+    { FX_P_DRIVE,     FX_P_CRASH,     FX_P_PREDELAY, FX_P_WOBBLE },    /* SPRING */
+    { FX_P_DEPTH,     FX_P_RATE,      FX_P_PREDELAY, FX_P_DAMPING },   /* CLOUD */
+    { FX_P_OCTAVE,    FX_P_DEPTH,     FX_P_PREDELAY, FX_P_DAMPING },   /* SHIMMER */
+    { FX_P_THRESHOLD, FX_P_RELEASE,   FX_P_PREDELAY, FX_P_GRIT },      /* GATED */
+    { FX_P_CURVE,     FX_P_THRESHOLD, FX_P_PREDELAY, FX_P_DAMPING },   /* REVERSE */
+};
+
+/* each control's default, which is also its value on a model that doesn't have it: there, every
+ * model sounds as it did before page 2 was its own */
+static const float P_DEFAULT[FX_P_N] = {
+    0.25f,   /* DEPTH */
+    0.40f,   /* RATE */
+    0.10f,   /* PREDELAY: 15 ms */
+    0.50f,   /* DAMPING: the model's own */
+    0.50f,   /* DENSITY: the model's own */
+    0.00f,   /* GRIT */
+    0.50f,   /* DRIVE: 1.6 */
+    0.50f,   /* CRASH */
+    0.50f,   /* WOBBLE */
+    1.00f,   /* OCTAVE: full */
+    0.50f,   /* THRESHOLD: -40 dBFS */
+    0.50f,   /* RELEASE: 8 ms */
+    0.50f,   /* CURVE: a square */
+};
+
+static const char *const P_NAME[FX_P_N] = {
+    "MOD DEPTH", "MOD RATE", "PRE-DELAY", "DAMPING", "DENSITY", "GRIT", "DRIVE",
+    "CRASH", "WOBBLE", "OCTAVE", "THRESHOLD", "RELEASE", "CURVE",
+};
+
+static int model_ok(int model) { return model >= 0 && model < FX_MODELS; }
+
+int fx_param2_id(int model, int slot)
+{
+    return model_ok(model) && slot >= 0 && slot < FX_SLOTS ? PAGE2[model][slot] : -1;
+}
+
+int fx_param2_slot(int model, int id)
+{
+    for (int k = 0; k < FX_SLOTS; k++) if (fx_param2_id(model, k) == id) return k;
+    return -1;
+}
+
+float fx_param2_default(int model, int slot)
+{
+    int id = fx_param2_id(model, slot);
+    return id >= 0 ? P_DEFAULT[id] : 0.0f;
+}
+
+const char *fx_param2_name(int model, int slot)
+{
+    int id = fx_param2_id(model, slot);
+    return id >= 0 ? P_NAME[id] : "?";
+}
+
 #define HALF_LOOP_S 0.20f    /* about one trip round half of the full-size tank */
 #define SPR_DOWN 4           /* the springs run at 48 / 4 = 12 kHz: a quarter of the work */
 #define SPR_L1 263           /* the springs' delays at 12 kHz: 22 and 25 ms, plus the dispersion's */
 #define SPR_L2 299
 #define SPR_LOOP 90          /* what the dispersion adds to a trip, on average (12 kHz frames) */
-#define SPR_DRIVE 1.6f       /* the tube driver: clean when quiet, squashed when hit hard */
+#define SPR_DRIVE 1.6f       /* the tube driver at DRIVE's middle: clean when quiet, squashed when hit hard */
 #define SPR_CRASH_T 0.20f    /* only a hard hit well over the recent level crashes the springs */
-#define SPR_CRASH_G 1.2f     /* and this much rattle per unit over */
+#define SPR_CRASH_G 1.2f     /* and this much rattle per unit over, at CRASH's middle */
 
 static void model_lengths(fx_engine *e, const model_t *m);
 
@@ -185,7 +246,7 @@ static void model_lengths(fx_engine *e, const model_t *m)
     e->n_d2 = (int)(3500.0f * s);
     e->n_d4 = (int)(3900.0f * s);
     e->size = s;
-    e->tank_c = m->tank_c;
+    e->tank_b = m->tank_c;
     e->depth_scale = m->depth_scale;
 }
 
@@ -204,7 +265,7 @@ static void model_carry(fx_engine *e, int model)
 {
     const model_t *m = &MODELS[model], *o = &MODELS[e->model];
     const int d2 = e->n_d2, d4 = e->n_d4, x1 = e->n_tap1x, x2 = e->n_tap2x, t1 = e->n_tap1, t2 = e->n_tap2;
-    e->o_tank_c = e->tank_c; e->o_diff_scale = o->diff_scale;
+    e->o_tank_c = e->tank_b; e->o_diff_scale = o->diff_scale;
     e->o_fb = e->fb; e->o_damp_c = e->damp_c; e->o_trim = o->trim;
     if ((m->flags & M_SHIMMER) && !(o->flags & M_SHIMMER)) e->sh_prime = 2 * XF_STAGE;  /* fill its window first */
     e->model = model;
@@ -285,10 +346,19 @@ STAGE static void control(fx_engine *e)
     e->mix = glide(e->mix, e->fader[FX_MIX], k30);
     e->decay = glide(e->decay, e->fader[FX_DECAY], k30);
     e->diffusion = glide(e->diffusion, e->fader[FX_DIFFUSION], k30);
-    e->depth = glide(e->depth, e->param2[FX_MOD_DEPTH], k30);
-    e->grit = glide(e->grit, e->param2[FX_GRIT], k30);
-    /* pre-delay moves slowly: a quick move would bend the pitch */
-    e->predelay = glide(e->predelay, e->param2[FX_PREDELAY] * (float)(PRE_MAX - 2), chunk_coef(0.1f, sr));
+
+    /* page 2: the playing model's own controls; the ones it doesn't have go to their defaults */
+    {
+        float want[FX_P_N];
+        for (int k = 0; k < FX_P_N; k++) want[k] = P_DEFAULT[k];
+        for (int k = 0; k < FX_SLOTS; k++) want[PAGE2[e->model][k]] = e->param2[e->model][k];
+        for (int k = 0; k < FX_P_N; k++) e->pv[k] = glide(e->pv[k], want[k], k30);
+        /* pre-delay moves slowly: a quick move would bend the pitch */
+        e->predelay = glide(e->predelay, want[FX_P_PREDELAY] * (float)(PRE_MAX - 2), chunk_coef(0.1f, sr));
+    }
+    const float *pv = e->pv;
+    e->depth = pv[FX_P_DEPTH];
+    e->grit = pv[FX_P_GRIT];
 
     /* the mix, constant power; ramped across the chunk, landing exactly on the targets */
     e->dry_t = fx_sqrtf(1.0f - e->mix);
@@ -309,29 +379,39 @@ STAGE static void control(fx_engine *e)
     if ((m->flags & M_SHIMMER) && e->fb > 0.96f) e->fb = 0.96f;       /* the octave adds energy */
     /* the spring's loop is short: the same darkening per trip would kill its tail */
     float fc = (m->flags & M_SPRING) ? m->damp_hz : m->damp_hz * fx_exp2f(-1.3f * e->decay);
-    e->damp_c = 1.0f - fx_exp2f(-1.44269504f * 2.0f * FX_PI * fc / ((m->flags & M_SPRING) ? ssr : sr));
+    fc *= fx_exp2f(3.0f * (pv[FX_P_DAMPING] - 0.5f));                 /* DAMPING: 0.35 to 2.8 times */
+    const float frate = (m->flags & M_SPRING) ? ssr : sr;
+    if (fc > 0.4f * frate) fc = 0.4f * frate;
+    e->damp_c = 1.0f - fx_exp2f(-1.44269504f * 2.0f * FX_PI * fc / frate);
     if (m->flags & M_SPRING) {
         e->sp_hc = 1.0f - fx_exp2f(-1.44269504f * 2.0f * FX_PI * 40.0f / ssr);    /* no rumble builds up */
         e->sp_oc = 1.0f - fx_exp2f(-1.44269504f * 2.0f * FX_PI * 220.0f / ssr);   /* the pickup: thin lows */
         e->sp_a = -(0.60f + 0.2f * e->diffusion);   /* negative: the lows arrive last */
+        e->sp_drive = 0.4f * fx_exp2f(4.0f * pv[FX_P_DRIVE]);          /* 0.4 to 6.4 */
+        e->sp_crash_g = 2.0f * SPR_CRASH_G * pv[FX_P_CRASH];
     }
     float ds = m->diff_scale;
     if (e->xf_on) {             /* a carried switch: the loop's gain and coefficients glide across */
         e->fb = e->o_fb + e->xp * (e->fb - e->o_fb);
         e->damp_c = e->o_damp_c + e->xp * (e->damp_c - e->o_damp_c);
         ds = e->o_diff_scale + e->xp * (ds - e->o_diff_scale);
-        e->tank_c = e->o_tank_c + e->xp * (m->tank_c - e->o_tank_c);
+        e->tank_b = e->o_tank_c + e->xp * (m->tank_c - e->o_tank_c);
     } else {
-        e->tank_c = m->tank_c;
+        e->tank_b = m->tank_c;
     }
-    e->diff_c = fx_clampf((0.30f + 0.45f * e->diffusion) * ds, 0.0f, 0.85f);
-    e->lfo_inc = (0.2f + 4.3f * e->param2[FX_MOD_RATE]) / sr;
+    /* DENSITY: the tank's allpasses and the input's diffusion, from half to one and a half times */
+    const float dens = 0.5f + pv[FX_P_DENSITY];
+    e->tank_c = fx_clampf(e->tank_b * dens, 0.1f, 0.75f);
+    e->diff_c = fx_clampf((0.30f + 0.45f * e->diffusion) * ds * (0.6f + 0.4f * dens), 0.0f, 0.85f);
+    e->lfo_inc = (0.2f + 4.3f * pv[FX_P_RATE]) / sr;
     if (m->flags & (M_GATE | M_REVERSE)) {
         e->k_len = (int)(fx_decay_seconds(e->model, e->decay) * sr);
         e->k_att = step_coef(0.0005f, sr, 1.0f);
         e->k_rel = step_coef(0.005f, sr, 1.0f);
         e->k_rel_s = step_coef(0.300f, sr, 1.0f);
-        e->k_close = step_coef(0.008f, sr, 1.0f);
+        e->k_close = step_coef(0.001f * fx_exp2f(6.0f * pv[FX_P_RELEASE]), sr, 1.0f);   /* 1 to 64 ms */
+        e->k_thr = fx_db2lin(-60.0f + 40.0f * pv[FX_P_THRESHOLD]);
+        e->k_curve = 2.0f * pv[FX_P_CURVE];
     }
 
     /* the reverb's filter: the middle fifth flat */
@@ -412,8 +492,8 @@ void tank_run(fx_engine *e, const float *l, const float *r, float *wl, float *wr
     const float dep = 16.0f * e->depth, dep1 = dep * e->ds1, dep3 = dep * e->ds3, inc = e->lfo_inc, pd = e->predelay;
     const int n1 = e->n_tap1, n2 = e->n_tap2, nd2 = e->n_d2, nd4 = e->n_d4;
     const float x1 = (float)e->n_tap1x, x2 = (float)e->n_tap2x;
-    /* SH: 0 no octave, 1 SHIMMER's, 2 coming or going (sh_g of it) */
-    const float shg = SH == 1 ? 1.0f : e->sh_g;
+    /* SH: 0 no octave, 1 SHIMMER's, 2 coming or going (sh_g of it); OCTAVE sets how much */
+    const float shg = (SH == 1 ? 1.0f : e->sh_g) * e->pv[FX_P_OCTAVE];
     /* XF 1..6: that length is crossfading to its new value (allpass 1, d4, d1, d2, allpass 2, d3) */
     const int nxd = XF == 1 ? e->nx_tap1 : XF == 2 ? e->nx_d4 : XF == 4 ? e->nx_d2 : e->nx_tap2;
     const float nxx = XF == 3 ? (float)e->nx_tap1x : (float)e->nx_tap2x, nxdep = dep * e->nx_ds;
@@ -439,8 +519,7 @@ void tank_run(fx_engine *e, const float *l, const float *r, float *wl, float *wr
         float d4o = tapi(e->t_d4, TK_D4, e->ti_d4, nd4);
         if (XF == 2) d4o += g1 * (tapi(e->t_d4, TK_D4, e->ti_d4, nxd) - d4o);
         float back = d4o;
-        if (SH == 1) back = 0.75f * d4o + 0.5f * shimmer(e->sh_buf, d4o, &shw, &shph, &shlp);
-        else if (SH) back = d4o + shg * (0.5f * shimmer(e->sh_buf, d4o, &shw, &shph, &shlp) - 0.25f * d4o);
+        if (SH) back = d4o + shg * (0.5f * shimmer(e->sh_buf, d4o, &shw, &shph, &shlp) - 0.25f * d4o);
         float a = allpass_t(x + fb * back, e->t_ap1, &e->ti_ap1, n1, tc, XF == 1, nxd, g1);
         e->t_d1[e->ti_d1] = a;
         float d1o = tap(e->t_d1, TK_D1, e->ti_d1, x1 + dep1 * m1);
@@ -502,10 +581,11 @@ STAGE static void reverb_tank(fx_engine *e, const float *l, const float *r, floa
 STAGE static void reverb_spring(fx_engine *e, const float *l, const float *r, float *wl, float *wr, int n)
 {
     const float fb = e->fb, dc = e->damp_c, hc = e->sp_hc, oc = e->sp_oc, pd = e->predelay, a = e->sp_a;
-    const float depth = 1.5f * e->depth, inc = e->lfo_inc * (float)SPR_DOWN;
+    const float wob = e->pv[FX_P_WOBBLE], depth = 1.5f * wob * wob, inc = e->lfo_inc * (float)SPR_DOWN;
     const fx_svf F = e->sp_f1;
     /* the crash's detector (attack 0.3 ms, release 15 ms, against a 250 ms average) and its burst (60 ms) */
     const float k_att = e->sp_k[0], k_rel = e->sp_k[1], k_avg = e->sp_k[2], k_cr = e->sp_k[3];
+    const float drive = e->sp_drive, inv_drive = 1.0f / drive, crash_g = e->sp_crash_g;
     float fast = e->sp_fast, slow = e->sp_slow, cr = e->sp_crash;
     uint32_t rng = e->sp_rng;
     float l1 = e->lfo1, dl = e->damp_l, dr = e->damp_r, h1 = e->sp_hp[0], h2 = e->sp_hp[1];
@@ -533,12 +613,12 @@ STAGE static void reverb_spring(fx_engine *e, const float *l, const float *r, fl
             fast += (ax - fast) * (ax > fast ? k_att : k_rel);
             slow += (fast - slow) * k_avg;
             float over = fast - 3.0f * slow - SPR_CRASH_T;
-            if (over > 0.0f && SPR_CRASH_G * over > cr) cr = SPR_CRASH_G * over;
+            if (over > 0.0f && crash_g * over > cr) cr = crash_g * over;
             else cr -= cr * k_cr;
             if (cr > 1e-6f) x += cr * fx_noise(&rng);
             else cr = 0.0f;
             /* the tube driver */
-            x = fx_softclip(SPR_DRIVE * x) * (1.0f / SPR_DRIVE);
+            x = fx_softclip(drive * x) * inv_drive;
 
             l1 += inc; if (l1 >= 1.0f) l1 -= 1.0f;
             float m = depth * (1.0f + tri(l1));
@@ -590,6 +670,7 @@ STAGE static void envelope(fx_engine *e, const float *l, const float *r, float *
     const int rev = MODELS[e->model].flags & M_REVERSE, len = e->k_len;
     const float att = e->k_att, rel = e->k_rel, rs = e->k_rel_s, cl = e->k_close;
     const float inv_len = 1.0f / (float)(len > 0 ? len : 1);
+    const float thr = e->k_thr, c1 = e->k_curve < 1.0f ? e->k_curve : 1.0f, c2 = e->k_curve - c1;
     float det = e->k_det, slow = e->k_slow, env = e->k_env;
     int t = e->k_t, run = e->k_run;
     for (int i = 0; i < n; i++) {
@@ -598,16 +679,19 @@ STAGE static void envelope(fx_engine *e, const float *l, const float *r, float *
         det += (pk - det) * (pk > det ? att : rel);
         slow += (det - slow) * rs;
         /* a hit: the level jumps well over its recent average */
-        int hit = det > 0.003f && det > 2.0f * slow + 0.002f;
+        int hit = det > 0.3f * thr && det > 2.0f * slow + 0.2f * thr;
         float target;
         if (rev) {
             if (hit && !run) { run = 1; t = 0; }
             if (run && t >= len) run = 0;
             float u = (float)t * inv_len;
-            target = run ? u * u : 0.0f;
+            /* CURVE: u, u^2 or u^3, and in between */
+            float sw = u * (1.0f + c1 * (u - 1.0f));
+            sw *= 1.0f + c2 * (u - 1.0f);
+            target = run ? sw : 0.0f;
             if (run) { env = target; } else env += (0.0f - env) * cl;
         } else {
-            if (det > 0.01f) t = 0;          /* held open while the input is there, then the gate time */
+            if (det > thr) t = 0;          /* held open while the input is there, then the gate time */
             target = t < len ? 1.0f : 0.0f;
             env += (target - env) * (target > env ? att : cl);
         }
@@ -724,10 +808,11 @@ void fx_init(fx_engine *e, float sr)
     e->fader[FX_DECAY] = 0.5f;
     e->fader[FX_DIFFUSION] = 0.7f;
     e->fader[FX_FILTER] = 0.5f;
-    e->param2[FX_MOD_DEPTH] = 0.25f;
-    e->param2[FX_MOD_RATE] = 0.4f;
-    e->param2[FX_PREDELAY] = 0.1f;
-    e->param2[FX_GRIT] = 0.0f;
+    for (int m = 0; m < FX_MODELS; m++)
+        for (int k = 0; k < FX_SLOTS; k++) e->param2[m][k] = P_DEFAULT[PAGE2[m][k]];
+    for (int k = 0; k < FX_P_N; k++) e->pv[k] = P_DEFAULT[k];
+    e->sp_drive = SPR_DRIVE; e->sp_crash_g = SPR_CRASH_G;
+    e->k_thr = 0.01f; e->k_curve = 1.0f;
     /* start at rest, not gliding there */
     e->decay = 0.5f; e->diffusion = 0.7f; e->depth = 0.25f;
     e->predelay = 0.1f * (float)(PRE_MAX - 2);
@@ -749,9 +834,9 @@ void fx_set_fader(fx_engine *e, int slot, float pos)
     if (slot >= 0 && slot < FX_SLOTS) e->fader[slot] = fx_clampf(pos, 0.0f, 1.0f);
 }
 
-void fx_set_param2(fx_engine *e, int slot, float pos)
+void fx_set_param2(fx_engine *e, int model, int slot, float pos)
 {
-    if (slot >= 0 && slot < FX_SLOTS) e->param2[slot] = fx_clampf(pos, 0.0f, 1.0f);
+    if (model_ok(model) && slot >= 0 && slot < FX_SLOTS) e->param2[model][slot] = fx_clampf(pos, 0.0f, 1.0f);
 }
 
 int fx_latency(const fx_engine *e)

@@ -25,7 +25,7 @@ static void fill(void)
 #define BENCH_MODEL FX_SHIMMER
 #endif
 
-void bench_init(void)   /* worst case: the reverb all in, its filter, grit and modulation on */
+void bench_init(void)   /* worst case: the reverb all in, its filter and its page 2 all up */
 {
     fx_init(&E, 48000.0f);
     fx_set_model(&E, BENCH_MODEL);
@@ -33,8 +33,7 @@ void bench_init(void)   /* worst case: the reverb all in, its filter, grit and m
     fx_set_fader(&E, FX_DECAY, 1.0f);
     fx_set_fader(&E, FX_DIFFUSION, 1.0f);
     fx_set_fader(&E, FX_FILTER, 1.0f);
-    fx_set_param2(&E, FX_MOD_DEPTH, 1.0f);
-    fx_set_param2(&E, FX_GRIT, 1.0f);
+    for (int k = 0; k < FX_SLOTS; k++) fx_set_param2(&E, BENCH_MODEL, k, 1.0f);   /* its page 2, all up */
 }
 
 void bench_block(void)   /* one firmware block: 128 frames */
