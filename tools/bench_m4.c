@@ -39,6 +39,11 @@ void bench_init(void)   /* worst case: the reverb all in, its filter, grit and m
 
 void bench_block(void)   /* one firmware block: 128 frames */
 {
+#ifdef BENCH_SWITCH
+    /* from the first measured block, a switch to BENCH_SWITCH: the blocks measured are its crossfade */
+    static int k;
+    if (++k == 81) fx_set_model(&E, BENCH_SWITCH);
+#endif
     fill();
     fx_process(&E, L, R, 128);
 }
