@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Download, Cpu, Terminal, ExternalLink, CheckCircle2, FileCode, Layers } from 'lucide-react';
+import { FIRMWARE_VERSION } from '../firmwareVersion';
 
 interface BinaryBuilderModalProps {
   isOpen: boolean;
@@ -72,9 +73,9 @@ export const BinaryBuilderModal: React.FC<BinaryBuilderModalProps> = ({ isOpen, 
           {/* Download Binary Button Card */}
           <div className="p-4 rounded-2xl bg-zinc-950 border border-zinc-800 flex flex-col sm:flex-row items-center justify-between gap-3">
             <div>
-              <div className="font-bold text-zinc-100 text-xs">sp1verb.bin</div>
+              <div className="font-bold text-zinc-100 text-xs">sp1verb.bin · {FIRMWARE_VERSION}</div>
               <div className="text-[10px] text-zinc-500">
-                Target: Nordic nRF52840 (64MHz FPU) · Size: ~64 KB
+                Target: Nordic nRF52840 (64MHz FPU) · Size: ~96 KB
               </div>
             </div>
 
@@ -129,17 +130,13 @@ export const BinaryBuilderModal: React.FC<BinaryBuilderModalProps> = ({ isOpen, 
           <div className="p-4 rounded-2xl bg-zinc-950 border border-zinc-800 space-y-2">
             <div className="flex items-center gap-1.5 font-bold text-zinc-200 text-xs">
               <Terminal className="w-3.5 h-3.5 text-zinc-400" />
-              <span>LOCAL EMBEDDED C BUILD (MAKEFILE):</span>
+              <span>LOCAL BUILD (ZEPHYR):</span>
             </div>
             <pre className="p-2.5 rounded-lg bg-black border border-zinc-800 text-[10px] text-emerald-400 overflow-x-auto">
-{`# 1. Install GNU ARM Embedded Toolchain
-sudo apt-get install gcc-arm-none-eabi binutils-arm-none-eabi
+{`# Needs ZEPHYR_BASE (Zephyr v4.3.1) and the Zephyr SDK 0.17.4
+make firmware
 
-# 2. Compile the binary from the repo
-cd firmware
-make
-
-# Output: firmware/build/sp1_verb.bin`}
+# Output: sp1verb.bin`}
             </pre>
           </div>
 

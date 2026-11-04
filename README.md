@@ -4,7 +4,7 @@ Firmware that turns the Teenage Engineering SP-1 into a reverb with eight models
 it over USB-C (it shows up as a sound card, "SP-1 Reverb", on a computer, phone or tablet), shape
 the space with the four faders, and hear it on headphones or the speaker.
 
-**Firmware:** [`sp1verb.bin`](sp1verb.bin) (flash with [solderless.engineering](https://solderless.engineering))
+**Firmware:** [`sp1verb.bin`](sp1verb.bin), **v0.2.2** ([all releases](https://github.com/sydilaxe/SP-1Verb-dev/releases)) (flash with [solderless.engineering](https://solderless.engineering))
 
 > **Not yet run on a real SP-1.** It builds, the engine passes its tests, and the platform code
 > is the same as SP-1FX's, which follows firmware that does run on the SP-1 (see Credits), but
