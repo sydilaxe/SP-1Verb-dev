@@ -6,6 +6,8 @@ the space with the four faders, and hear it on headphones or the speaker.
 
 **Firmware:** [`sp1verb.bin`](sp1verb.bin) (flash with [solderless.engineering](https://solderless.engineering))
 
+**Manual:** `SP-1-Reverb-manual.pdf` on each [release](../../releases) (source: [`docs/manual/manual.md`](docs/manual/manual.md))
+
 > **Not yet run on a real SP-1.** It builds, the engine passes its tests, and the platform code
 > is the same as SP-1FX's, which follows firmware that does run on the SP-1 (see Credits), but
 > this exact binary has not been on hardware.
@@ -107,6 +109,7 @@ readings, `usb=` streaming, `fill=` the input buffer, `under= over=` buffer unde
 make test        # the engine on your computer: checks for every model, and WAVs in build/test
 make firmware    # sp1verb.bin; needs ZEPHYR_BASE (Zephyr v4.3.1) and the Zephyr SDK 0.17.4
 make bench       # the Cortex-M4 cycle estimate (pip install unicorn capstone)
+./scripts/build-manual.sh   # the user manual, build/manual/SP-1-Reverb-manual.pdf (pandoc + Chrome)
 ```
 
 `.github/workflows/build.yml` builds the firmware, checks it loads where the bootloader puts it,
@@ -120,6 +123,7 @@ the WAVs as artifacts.
 | `firmware/` | Zephyr application: USB audio (UAC2), I2S, codecs, faders, buttons, lights, power |
 | `boards/` | the SP-1 board definition |
 | `tools/bench_m4.py` | the CPU estimate |
+| `docs/manual/` | the user manual (Markdown); CI builds the PDF and attaches it to every release |
 | `src/`, `index.html` | a browser preview of the controls (separate from the firmware; its presets are not the firmware's models) |
 
 ## Credits
