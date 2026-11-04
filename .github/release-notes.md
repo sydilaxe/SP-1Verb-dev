@@ -23,3 +23,5 @@ output is the input, bit for bit, 1 ms later. A -1 dBFS safety ceiling only acts
 
 **If something is wrong**, open the SP-1's USB serial port: a status line a second shows the model, the
 faders, the USB stream, the audio load (`blk=`, microseconds per 2.67 ms block) and the last crash.
+
+**The full user manual** is attached below as `SP-1-Reverb-manual.pdf`.
