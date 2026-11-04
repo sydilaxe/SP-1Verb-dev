@@ -52,7 +52,8 @@ track light blinks until then.
 After the mix, a **safety ceiling** at -1 dBFS (1 ms look-ahead) is always on and only acts on
 overs.
 
-**Full bandwidth, 24-bit:** USB audio is 48 kHz / 24-bit in and out, and the reverb runs at
+**Full bandwidth, 16- or 24-bit:** USB audio is 48 kHz, 16-bit or 24-bit (the host picks: Linux
+handhelds such as the TrimUI Brick use 16-bit, computers usually 24-bit), out at 24-bit; the reverb runs at
 48 kHz in 32-bit floating point. With Mix at the bottom the output is the input, bit for bit,
 48 samples (1 ms) later.
 
