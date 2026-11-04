@@ -11,9 +11,15 @@ and plug back in. The same plug-in hold always gets back to the bootloader, what
 **Models** (TRACK n picks model n; the same button again flips to n + 4): Hall, Plate, Room, Spring /
 Cloud, Shimmer, Gated, Reverse.
 
-**Faders:** page 1 Mix, Decay, Diffusion, Filter (the reverb's tone; centre fifth flat). FWD goes to page 2:
-Mod depth, Mod rate, Pre-delay, Grit; RWD back to page 1. A parameter picks up when its fader reaches it, so
+**Faders:** page 1 Mix, Decay, Diffusion, Filter (the reverb's tone; centre fifth flat), the same on every
+model. FWD on the side rocker goes to page 2, the playing model's own four controls (each model remembers its
+own; fader 3 is always Pre-delay); RWD back to page 1. A parameter picks up when its fader reaches it, so
 nothing jumps.
+
+**New: page 2 per model.** Hall and Cloud: Mod depth, Mod rate, Pre-delay, Damping. Plate and Room: Density,
+Damping, Pre-delay, Grit. Spring: Drive, Crash, Pre-delay, Wobble. Shimmer: Octave, Mod depth, Pre-delay,
+Damping. Gated: Threshold, Release, Pre-delay, Grit. Reverse: Curve, Threshold, Pre-delay, Damping. At their
+starting positions every model sounds as before.
 
 **Other buttons:** PLAY bypasses the reverb, VOL + / - set the volume (3 dB steps), hold FUNCTION to power on
 (1.5 s) or off (2.5 s), hold TRACK 1 + 4 for 3 s to restart into the bootloader.

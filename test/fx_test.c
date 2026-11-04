@@ -189,6 +189,13 @@ static void faders(float f1, float f2, float f3, float f4)
     fx_set_fader(&E, FX_FILTER, f4);
 }
 
+/* a page 2 control of the model picked last; nothing if that model doesn't have it */
+static void setp(int id, float v)
+{
+    int k = fx_param2_slot(E.model_next, id);
+    if (k >= 0) fx_set_param2(&E, E.model_next, k, v);
+}
+
 /* a fresh engine on a model (already switched in) */
 static void start(int model)
 {
@@ -221,7 +228,7 @@ static void impulse(int model, float decay, float diff, float *l, float *r, int 
 {
     start(model);
     faders(1.0f, decay, diff, 0.5f);
-    fx_set_param2(&E, FX_PREDELAY, 0.0f);
+    setp(FX_P_PREDELAY, 0.0f);
     memset(l, 0, 4 * n); memset(r, 0, 4 * n);
     l[200] = r[200] = 0.5f;
     for (int i = 0; i < n; i += 256) fx_process(&E, l + i, r + i, n - i < 256 ? n - i : 256);
@@ -398,10 +405,9 @@ int main(int argc, char **argv)
                 double t = (double)i / N;
                 double tr_ = t < 0.5 ? 2 * t : 2 - 2 * t;
                 faders((float)tr_, (float)(0.5 + 0.5 * sin(2 * M_PI * 2 * t)), (float)tr_, (float)(1 - tr_));
-                fx_set_param2(&E, FX_MOD_DEPTH, (float)tr_);
-                fx_set_param2(&E, FX_MOD_RATE, (float)tr_);
-                fx_set_param2(&E, FX_PREDELAY, (float)(0.5 - 0.5 * cos(2 * M_PI * t)));
-                fx_set_param2(&E, FX_GRIT, (float)tr_);
+                for (int k = 0; k < FX_SLOTS; k++)   /* the model's own page 2 */
+                    fx_set_param2(&E, m, k, fx_param2_id(m, k) == FX_P_PREDELAY
+                                  ? (float)(0.5 - 0.5 * cos(2 * M_PI * t)) : (float)(k & 1 ? 1 - tr_ : tr_));
                 fx_process(&E, l + i, r + i, 64);
             }
             double c = fmax(click_ratio(l, N), click_ratio(r, N));
@@ -426,7 +432,7 @@ int main(int argc, char **argv)
         float dec = 0.4f;
         double gt = fx_decay_seconds(FX_GATED, dec);
         int n = 3 * SR;
-        start(FX_GATED); faders(1.0f, dec, 0.7f, 0.5f); fx_set_param2(&E, FX_PREDELAY, 0.0f);
+        start(FX_GATED); faders(1.0f, dec, 0.7f, 0.5f); setp(FX_P_PREDELAY, 0.0f);
         memset(hl, 0, 4 * n); memset(hr, 0, 4 * n);
         unsigned s = 5;
         for (int i = SR / 2; i < SR / 2 + SR / 20; i++) hl[i] = hr[i] = (float)(0.5 * nz(&s));  /* a 50 ms hit */
@@ -441,7 +447,7 @@ int main(int argc, char **argv)
         float dec = 0.5f;
         double len = fx_decay_seconds(FX_REVERSE, dec);
         int n = 3 * SR, h = SR / 2;
-        start(FX_REVERSE); faders(1.0f, dec, 0.7f, 0.5f); fx_set_param2(&E, FX_PREDELAY, 0.0f);
+        start(FX_REVERSE); faders(1.0f, dec, 0.7f, 0.5f); setp(FX_P_PREDELAY, 0.0f);
         memset(hl, 0, 4 * n); memset(hr, 0, 4 * n);
         for (int i = h; i < h + 480; i++) hl[i] = hr[i] = 0.5f * (float)sin(2 * M_PI * 300.0 * i / SR);
         fx_process(&E, hl, hr, n);
@@ -460,7 +466,7 @@ int main(int argc, char **argv)
             int n = 4 * SR;
             double p8 = 0, p4 = 0;
             for (int j = 0; j < 8; j++) {
-                start(ms[k]); faders(1.0f, 0.6f, 0.7f, 0.5f); fx_set_param2(&E, FX_MOD_DEPTH, 0.0f);
+                start(ms[k]); faders(1.0f, 0.6f, 0.7f, 0.5f); setp(FX_P_DEPTH, 0.0f);
                 memset(hl, 0, 4 * n); memset(hr, 0, 4 * n);
                 fx_process(&E, hl, hr, 1 + 256 * j);   /* silence: the window moves on */
                 memset(hl, 0, 4 * n); memset(hr, 0, 4 * n);
@@ -484,7 +490,7 @@ int main(int argc, char **argv)
     {   /* SPRING: a hard hit crashes the springs (a burst of rattle); a soft one only rings them */
         double e[2]; const float amp[2] = { 0.03f, 0.9f };
         for (int k = 0; k < 2; k++) {
-            start(FX_SPRING); faders(1.0f, 0.3f, 0.7f, 0.5f); fx_set_param2(&E, FX_PREDELAY, 0.0f);
+            start(FX_SPRING); faders(1.0f, 0.3f, 0.7f, 0.5f); setp(FX_P_PREDELAY, 0.0f);
             memset(hl, 0, 4 * SR); memset(hr, 0, 4 * SR);
             for (int i = 0; i < 96; i++) hl[SR / 10 + i] = hr[SR / 10 + i] = amp[k] * (float)sin(2 * M_PI * 250.0 * i / SR);
             for (int i = 0; i < SR; i += 256) fx_process(&E, hl + i, hr + i, SR - i < 256 ? SR - i : 256);
@@ -520,7 +526,7 @@ int main(int argc, char **argv)
         double worst = 0, wc = 0;
         for (int p = 0; p < 6; p++) {
             const int n = 2 * SR, sw = SR;
-            start(pairs[p][0]); faders(1.0f, 0.6f, 0.7f, 0.5f); fx_set_param2(&E, FX_PREDELAY, 0.0f);
+            start(pairs[p][0]); faders(1.0f, 0.6f, 0.7f, 0.5f); setp(FX_P_PREDELAY, 0.0f);
             memset(hl, 0, 4 * n); memset(hr, 0, 4 * n);
             unsigned s = 3;
             for (int i = 0; i < SR / 4; i++) hl[i] = hr[i] = (float)(0.3 * nz(&s));
@@ -541,7 +547,7 @@ int main(int argc, char **argv)
     }
     {   /* SHIMMER at full DECAY dies away: its octave once fed the lows back until they ran away */
         const int n = 12 * SR;
-        start(FX_SHIMMER); faders(1.0f, 1.0f, 0.7f, 0.5f); fx_set_param2(&E, FX_MOD_DEPTH, 1.0f);
+        start(FX_SHIMMER); faders(1.0f, 1.0f, 0.7f, 0.5f); setp(FX_P_DEPTH, 1.0f);
         memset(hl, 0, 4 * n); memset(hr, 0, 4 * n);
         unsigned s = 5;
         for (int i = 0; i < 2 * SR; i++) hl[i] = hr[i] = (float)(0.8 * nz(&s));
@@ -569,19 +575,100 @@ int main(int argc, char **argv)
         check(dry, "filter: the dry is untouched (MIX at the bottom, filter down)", dry);
     }
     {   /* grit: gritty, but a quiet tail is not cut off */
-        impulse(FX_HALL, 0.5f, 0.7f, hl, hr, 4 * SR);
+        impulse(FX_PLATE, 0.7f, 0.7f, hl, hr, 4 * SR);
         double t0 = rms_db(hl, 2 * SR, 4 * SR);
-        start(FX_HALL); faders(1.0f, 0.5f, 0.7f, 0.5f);
-        fx_set_param2(&E, FX_PREDELAY, 0.0f); fx_set_param2(&E, FX_GRIT, 1.0f);
+        start(FX_PLATE); faders(1.0f, 0.7f, 0.7f, 0.5f);
+        setp(FX_P_PREDELAY, 0.0f); setp(FX_P_GRIT, 1.0f);
         memset(hl, 0, 16 * SR); memset(hr, 0, 16 * SR); hl[200] = hr[200] = 0.5f;
         fx_process(&E, hl, hr, 4 * SR);
         double t1 = rms_db(hl, 2 * SR, 4 * SR);
         check(fabs(t1 - t0) < 3, "grit at full: the late tail keeps its level (dB)", t1 - t0);
     }
+    /* ---- page 2: each model's own ---- */
+    {   /* every model has four distinct controls, PRE-DELAY on fader 3, and keeps its own */
+        int ok = 1;
+        for (int m = 0; m < FX_MODELS; m++) {
+            if (fx_param2_id(m, 2) != FX_P_PREDELAY) ok = 0;
+            for (int a = 0; a < FX_SLOTS; a++)
+                for (int b = a + 1; b < FX_SLOTS; b++) if (fx_param2_id(m, a) == fx_param2_id(m, b)) ok = 0;
+        }
+        fx_init(&E, SR);
+        fx_set_param2(&E, FX_HALL, 2, 0.9f);
+        ok = ok && E.param2[FX_PLATE][2] == fx_param2_default(FX_PLATE, 2);
+        check(ok, "page 2: four controls per model, PRE-DELAY on 3, each model its own", ok);
+    }
+    {   /* at its defaults, page 2 leaves each model as it was: the same RT60 as with nothing set */
+        double worst = 0;
+        for (int m = 0; m < FX_MODELS; m++) {
+            if (m == FX_GATED || m == FX_REVERSE) continue;
+            impulse(m, 0.4f, 0.7f, hl, hr, NI);
+            double a = rt60(hl + 200, hr + 200, NI - 200);
+            start(m); faders(1.0f, 0.4f, 0.7f, 0.5f);
+            for (int k = 0; k < FX_SLOTS; k++) fx_set_param2(&E, m, k, fx_param2_default(m, k));
+            setp(FX_P_PREDELAY, 0.0f);
+            memset(hl, 0, 4 * NI); memset(hr, 0, 4 * NI); hl[200] = hr[200] = 0.5f;
+            for (int i = 0; i < NI; i += 256) fx_process(&E, hl + i, hr + i, NI - i < 256 ? NI - i : 256);
+            double b = rt60(hl + 200, hr + 200, NI - 200);
+            if (fabs(b / a - 1) > worst) worst = fabs(b / a - 1);
+        }
+        check(worst < 0.01, "page 2 at its defaults: every model's RT60 unchanged (ratio off)", worst);
+    }
+    {   /* DAMPING: down darkens the tail, up brightens it (HALL) */
+        double hi[2]; const float dv[2] = { 0.0f, 1.0f };
+        for (int k = 0; k < 2; k++) {
+            start(FX_HALL); faders(1.0f, 0.5f, 0.7f, 0.5f); setp(FX_P_PREDELAY, 0.0f); setp(FX_P_DAMPING, dv[k]);
+            memset(hl, 0, 4 * SR); memset(hr, 0, 4 * SR); hl[200] = hr[200] = 0.5f;
+            fx_process(&E, hl, hr, SR);
+            hi[k] = band_db(hl, SR / 4, SR, 3000, 9000) - band_db(hl, SR / 4, SR, 200, 800);
+        }
+        check(hi[1] - hi[0] > 5, "HALL DAMPING: the tail's top, up vs down (dB)", hi[1] - hi[0]);
+    }
+    {   /* OCTAVE at the bottom: SHIMMER with no octave in its tail */
+        int n = 4 * SR;
+        double r[2]; const float ov[2] = { 1.0f, 0.0f };
+        for (int k = 0; k < 2; k++) {
+            double p8 = 0, p4 = 0;
+            for (int j = 0; j < 4; j++) {
+                start(FX_SHIMMER); faders(1.0f, 0.6f, 0.7f, 0.5f); setp(FX_P_DEPTH, 0.0f); setp(FX_P_OCTAVE, ov[k]);
+                memset(hl, 0, 4 * n); memset(hr, 0, 4 * n);
+                fx_process(&E, hl, hr, 1 + 512 * j);
+                memset(hl, 0, 4 * n); memset(hr, 0, 4 * n);
+                for (int i = 0; i < SR / 2; i++) hl[i] = hr[i] = 0.3f * (float)sin(2 * M_PI * 440.0 * i / SR);
+                fx_process(&E, hl, hr, n);
+                p8 += pow(10, tone_db(hl, SR, 3 * SR, 880.0) / 10);
+                p4 += pow(10, tone_db(hl, SR, 3 * SR, 440.0) / 10);
+            }
+            r[k] = 10 * log10(p8 / p4);
+        }
+        check(r[0] - r[1] > 10, "SHIMMER OCTAVE: full vs none, the octave in the tail (dB)", r[0] - r[1]);
+    }
+    {   /* SPRING CRASH at the bottom: a hard hit only rings the springs */
+        double e[2]; const float cv[2] = { 0.5f, 0.0f };
+        for (int k = 0; k < 2; k++) {
+            start(FX_SPRING); faders(1.0f, 0.3f, 0.7f, 0.5f); setp(FX_P_PREDELAY, 0.0f); setp(FX_P_CRASH, cv[k]);
+            memset(hl, 0, 4 * SR); memset(hr, 0, 4 * SR);
+            for (int i = 0; i < 96; i++) hl[SR / 10 + i] = hr[SR / 10 + i] = 0.9f * (float)sin(2 * M_PI * 250.0 * i / SR);
+            fx_process(&E, hl, hr, SR);
+            e[k] = band_db(hl, SR / 10 + 200, SR / 2, 2000, 4500);
+        }
+        check(e[0] - e[1] > 8, "SPRING CRASH: the rattle, middle vs bottom (dB)", e[0] - e[1]);
+    }
+    {   /* GATED THRESHOLD: a quiet hit (-34 dBFS) opens the gate at the middle (-40), not at the top (-20) */
+        double lv[2]; const float tv[2] = { 0.5f, 1.0f };
+        for (int k = 0; k < 2; k++) {
+            start(FX_GATED); faders(1.0f, 0.4f, 0.7f, 0.5f); setp(FX_P_PREDELAY, 0.0f); setp(FX_P_THRESHOLD, tv[k]);
+            memset(hl, 0, 4 * SR); memset(hr, 0, 4 * SR);
+            unsigned s = 5;
+            for (int i = SR / 4; i < SR / 4 + SR / 20; i++) hl[i] = hr[i] = (float)(0.02 * nz(&s));
+            fx_process(&E, hl, hr, SR);
+            lv[k] = rms_db(hl, SR / 4 + SR / 20 + SR / 50, SR / 4 + SR / 20 + SR / 10);
+        }
+        check(lv[0] - lv[1] > 30, "GATED THRESHOLD: a quiet hit opens it at the middle, not the top (dB)", lv[0] - lv[1]);
+    }
     {   /* pre-delay: the reverb starts that much later */
         double at[2]; const float pv[2] = { 0.0f, 0.5f };
         for (int k = 0; k < 2; k++) {
-            start(FX_PLATE); faders(1.0f, 0.4f, 0.7f, 0.5f); fx_set_param2(&E, FX_PREDELAY, pv[k]);
+            start(FX_PLATE); faders(1.0f, 0.4f, 0.7f, 0.5f); setp(FX_P_PREDELAY, pv[k]);
             float *z = calloc(SR, 4), *zr = calloc(SR, 4);
             for (int i = 0; i < SR; i += 256) fx_process(&E, z + i, zr + i, SR - i < 256 ? SR - i : 256);   /* settle */
             memset(z, 0, 4 * SR); memset(zr, 0, 4 * SR); z[0] = zr[0] = 0.5f;

@@ -6,9 +6,10 @@
  *
  * Controls
  *   faders 1-4        page 1: MIX, DECAY, DIFFUSION, FILTER (the reverb's tone)
- *                     page 2: MOD DEPTH, MOD RATE, PRE-DELAY, GRIT
- *   FWD (>>) / RWD (<<)  page 2 / page 1. After a page change a parameter keeps its value until
- *                     its fader reaches it (pick-up), so nothing jumps.
+ *                     page 2: the playing model's own four controls (fx/fx.h has the table);
+ *                     each model keeps its own, and fader 3 is PRE-DELAY on every model
+ *   FWD (>>) / RWD (<<)  page 2 / page 1. After a page change, or a model change on page 2, a
+ *                     parameter keeps its value until its fader reaches it (pick-up), so nothing jumps.
  *   TRACK 1-4         the model: TRACK n picks model n (HALL, PLATE, ROOM, SPRING); the same
  *                     button again flips to model n + 4 (CLOUD, SHIMMER, GATED, REVERSE) and back
  *   PLAY              bypass on/off (the reverb glides out and back; the safety ceiling stays)
@@ -17,8 +18,8 @@
  *   TRACK 1 + 4, hold 3 s: reset into the bootloader for flashing
  *
  * Lights
- *   track lights      page 1: each fader (FILTER: distance from the centre). Page 2: each
- *                     second parameter. Blinking until a fader picks up. For 1.2 s after a model
+ *   track lights      page 1: each fader (FILTER: distance from the centre). Page 2: the
+ *                     model's own controls. Blinking until a fader picks up. For 1.2 s after a model
  *                     change: the model's light, steady for models 1-4, blinking for 5-8
  *   status lights     the safety ceiling's gain reduction (0.5, 2, 4, 8 dB), the fourth
  *                     blinking on page 2; volume for a second after a change; the page for 0.6 s
@@ -558,8 +559,8 @@ static int g_i2s_rc = 1;
 
 static fx_engine g_fx;                       /* a few KB of state */
 static volatile float g_fader[4] = { 0.0f, 0.5f, 0.7f, 0.5f };   /* as fx_init sets them */
-static volatile float g_param2[4] = { 0.25f, 0.4f, 0.1f, 0.0f };
-static volatile int g_page;                  /* 0: Main amounts, 1: Secondary parameters */
+static volatile float g_param2[FX_MODELS][4]; /* each model's own page 2; set from the engine's defaults */
+static volatile int g_page;                  /* 0: page 1, the shared faders; 1: page 2, the model's own */
 static volatile bool g_bypass;
 static volatile int g_model;                 /* FX_HALL .. FX_REVERSE, picked with the track buttons */
 static volatile int g_vol_db = -6;           /* output volume, 3 dB steps, -60..0 */
@@ -633,7 +634,7 @@ static void audio_block(int32_t *out)
 	/* bypass takes MIX to the bottom through the engine, so the reverb glides out and back; the
 	 * dry then passes exactly (only delayed), and the latency never changes, so it never clicks */
 	static float last_f[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
-	static float last_p2[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
+	static float last_p2[FX_MODELS][4];
 	fx_set_model(&g_fx, g_model);   /* the engine fades the old model out and the new one in */
 	for (int k = 0; k < 4; k++) {
 		float f = (g_bypass && k == FX_MIX) ? 0.0f : g_fader[k];
@@ -641,12 +642,15 @@ static void audio_block(int32_t *out)
 			fx_set_fader(&g_fx, k, f);
 			last_f[k] = f;
 		}
-		float p2 = g_param2[k];
-		if (p2 != last_p2[k]) {
-			fx_set_param2(&g_fx, k, p2);
-			last_p2[k] = p2;
-		}
 	}
+	for (int m = 0; m < FX_MODELS; m++)
+		for (int k = 0; k < 4; k++) {
+			float p2 = g_param2[m][k];
+			if (p2 != last_p2[m][k]) {
+				fx_set_param2(&g_fx, m, k, p2);
+				last_p2[m][k] = p2;
+			}
+		}
 	fx_process(&g_fx, bufl, bufr, BLK_FRAMES);
 
 	/* volume after the limiter, ramped across the block */
@@ -722,6 +726,8 @@ static void audio_thread(void *a, void *b, void *c)
 static void audio_init(void)
 {
 	fx_init(&g_fx, (float)I2S_HZ);
+	for (int m = 0; m < FX_MODELS; m++)
+		for (int k = 0; k < 4; k++) g_param2[m][k] = fx_param2_default(m, k);
 	g_vol_lin = 0.0f;   /* fades in from silence */
 	pin_out(OSC_EN_PORT, OSC_EN_PIN, 1);
 	k_msleep(5);
@@ -922,7 +928,7 @@ int main(void)
 				float p = (float)g_adc[CH_FADER0 + k] / FADER_TOP;
 				p = p < 0.0f ? 0.0f : p > 1.0f ? 1.0f : p;
 				fpos[k] = first ? p : fpos[k] + 0.35f * (p - fpos[k]);
-				volatile float *dst = g_page == 0 ? &g_fader[k] : &g_param2[k];
+				volatile float *dst = g_page == 0 ? &g_fader[k] : &g_param2[g_model][k];
 				if (!caught[k]) {
 					float d = fpos[k] - *dst;
 					int sd = d < 0.0f ? -1 : 1;
@@ -958,6 +964,9 @@ int main(void)
 						if (g_model == m) m += 4;
 						g_model = m;
 						model_show_until = now + 1200;
+						/* page 2 is the model's own: its faders pick up the new model's values */
+						if (g_page == 1)
+							for (int k = 0; k < 4; k++) { caught[k] = false; side[k] = 0; }
 					}
 				}
 				play_armed = false; trk_cand = -1; trk_n = 0; play_n = 0; odd_n = 0; chord = false;
@@ -1030,9 +1039,10 @@ int main(void)
 					led_set(g_trk_duty, i, v);
 				}
 			} else {
-				/* page 2: each second parameter */
+				/* page 2: the model's own controls */
 				for (int i = 0; i < 4; i++) {
-					int v = 4 + (int)(g_param2[i] * g_param2[i] * LED_DIM);
+					float a = g_param2[g_model][i];
+					int v = 4 + (int)(a * a * LED_DIM);
 					if (!caught[i] && tick % 30u < 10u) v = 0;   /* waiting for pick-up */
 					led_set(g_trk_duty, i, v);
 				}
