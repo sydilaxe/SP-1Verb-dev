@@ -1,5 +1,6 @@
 SP-1 Reverb test build for the Teenage Engineering SP-1: a reverb with eight models. Audio in over USB-C
-(a class-compliant sound card, 48 kHz / 24-bit), out on headphones or the speaker.
+(a class-compliant sound card, 48 kHz, 16- or 24-bit: the host picks, so Linux handhelds such as the TrimUI
+Brick work too), out on headphones or the speaker.
 
 **Not yet tried on a real SP-1.** It builds, the engine passes its tests, and the platform code is the same
 as SP-1FX's, but this binary has not been on hardware yet.
@@ -24,7 +25,7 @@ starting positions every model sounds as before.
 **Other buttons:** PLAY bypasses the reverb, VOL + / - set the volume (3 dB steps), hold FUNCTION to power on
 (1.5 s) or off (2.5 s), hold TRACK 1 + 4 for 3 s to restart into the bootloader.
 
-**The sound:** full bandwidth: 48 kHz / 24-bit in and out, 32-bit float inside. With Mix at the bottom the
+**The sound:** full bandwidth: 48 kHz, 16- or 24-bit in, 24-bit out, 32-bit float inside. With Mix at the bottom the
 output is the input, bit for bit, 1 ms later. A -1 dBFS safety ceiling only acts on overs.
 
 **If something is wrong**, open the SP-1's USB serial port: a status line a second shows the model, the
