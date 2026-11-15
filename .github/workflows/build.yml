@@ -12,6 +12,11 @@ on:
         required: false
         default: ""
 
+# the release tag, when this run publishes one: a pushed v* (or V*) tag, a release created on the
+# website, or a manual run with release_tag filled in (with or without the v)
+env:
+  RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name || ((startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/V')) && github.ref_name) || '' }}
+
 jobs:
   firmware:
     name: SP-1 firmware (sp1verb.bin)
@@ -101,10 +106,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: The README shows the source's version
         run: |
-          # README's "Latest release" line and FIRMWARE_VERSION in src/firmwareVersion.ts move together
-          v=$(sed -n "s/.*FIRMWARE_VERSION = 'v\\([^']*\\)'.*/\\1/p" src/firmwareVersion.ts)
-          grep -qF "**Latest release:** [v$v](../../releases/tag/v$v)" README.md ||
-            { echo "::error::README.md's Latest release line isn't v$v, FIRMWARE_VERSION in src/firmwareVersion.ts"; exit 1; }
+          # README's "Latest release" line and the version in the source (make version) move together
+          v=$(make -s version)
+          grep -qiF "**Latest release:** [v$v](../../releases/tag/v$v)" README.md ||
+            { echo "::error::README.md's Latest release line isn't v$v, the version in the source"; exit 1; }
 
       - name: Build and run the checks
         run: |
@@ -148,10 +153,11 @@ jobs:
       - name: Tools
         run: sudo apt-get update -qq && sudo apt-get install -y -qq pandoc fonts-inter >/dev/null
       - name: Build the PDF
-        env:
-          VERSION: ${{ inputs.release_tag || github.event.release.tag_name || '' }}
         run: |
-          [ -n "$VERSION" ] || unset VERSION
+          # a release's manual shows its tag (V0.5.0 or 0.5.0 is taken as v0.5.0); otherwise git describe's
+          if [ -n "$RELEASE_TAG" ]; then
+            v=$(printf '%s' "$RELEASE_TAG" | tr -d '[:space:]'); export VERSION=v${v#[vV]}
+          fi
           CHROME=$(command -v google-chrome) ./scripts/build-manual.sh
       - name: Remind to update the manual
         if: github.event_name == 'pull_request'
@@ -184,10 +190,18 @@ jobs:
         with:
           name: manual
 
+      - name: The release's tag
+        run: |
+          # a manual run's tag may leave out the v, or be typed V0.5.0: it is published as v0.5.0
+          v=$(printf '%s' "$RELEASE_TAG" | tr -d '[:space:]'); v=${v#[vV]}
+          echo "$v" | grep -Eqx '[0-9]+(\.[0-9]+)*' || { echo "::error::release tag $RELEASE_TAG isn't v<number>.<number>..."; exit 1; }
+          TAG=v$v
+          # a release made on the website keeps its own tag; the files go onto it
+          if [ "$GITHUB_EVENT_NAME" = release ]; then TAG=$RELEASE_TAG; fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
       - name: Create GitHub release with sp1verb.bin and the manual
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.release_tag || github.event.release.tag_name || github.ref_name }}
         run: |
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" sp1verb.bin SP-1-Reverb-manual.pdf --repo "$GITHUB_REPOSITORY" --clobber
