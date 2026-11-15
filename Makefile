@@ -24,4 +24,8 @@ bench:
 clean:
 	rm -rf build
 
-.PHONY: test firmware bench clean
+# the firmware's version: FIRMWARE_VERSION in src/firmwareVersion.ts, without the v
+version:
+	@sed -n "s/.*FIRMWARE_VERSION = 'v\\([^']*\\)'.*/\\1/p" src/firmwareVersion.ts
+
+.PHONY: version test firmware bench clean
