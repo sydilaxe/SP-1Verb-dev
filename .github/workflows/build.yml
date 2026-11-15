@@ -168,8 +168,8 @@ jobs:
 
   release:
     name: Publish release
-    # runs for: a pushed v* tag, a release created on the website, or a manual run with a tag filled in
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release' || inputs.release_tag != ''
+    # runs for: a pushed v* (or V*) tag, a release created on the website, or a manual run with a tag filled in
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/V') || github.event_name == 'release' || inputs.release_tag != ''
     needs: [firmware, test, manual]
     runs-on: ubuntu-latest
     permissions:
@@ -197,5 +197,5 @@ jobs:
               --target "$GITHUB_SHA" \
               --title "SP-1 Reverb $TAG" \
               --notes-file .github/release-notes.md \
-              --prerelease
+              --latest
           fi
